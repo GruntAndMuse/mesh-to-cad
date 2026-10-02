@@ -89,6 +89,4 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
-    # Windows version info — shows in file properties.
-    version='version-info.txt',
 )
