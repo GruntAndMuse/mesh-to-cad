@@ -1,0 +1,95 @@
+name: Build executables
+
+# WHY this exists: users shouldn't need Python, a build environment, or
+# technical knowledge to use mesh-to-cad. Every push to main automatically
+# builds standalone executables for Windows, macOS, and Linux.
+# Users download from the Releases page. That's it.
+#
+# Dennis's rule: "as close to 1 thing that does everything as possible."
+# A download-and-double-click exe is the closest we can get.
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  workflow_dispatch:  # manual trigger from the Actions tab
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        include:
+          - os: windows-latest
+            exe_name: mesh-to-cad.exe
+            artifact_name: mesh-to-cad-windows
+          - os: ubuntu-latest
+            exe_name: mesh-to-cad
+            artifact_name: mesh-to-cad-linux
+          - os: macos-latest
+            exe_name: mesh-to-cad
+            artifact_name: mesh-to-cad-macos
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r scripts/requirements.txt
+          pip install pyinstaller
+
+      - name: Build executable
+        run: pyinstaller --noconfirm mesh-to-cad.spec
+
+      - name: Smoke test
+        shell: bash
+        run: |
+          # The exe must at least print --help without crashing.
+          # WHY: catches the "built but broken" failure we hit on 2026-10-02
+          # (missing version-info.txt, scripts/ not bundled).
+          if [[ "${{ matrix.os }}" == "windows-latest" ]]; then
+            ./dist/${{ matrix.exe_name }} --help
+          else
+            ./dist/${{ matrix.exe_name }} --help
+          fi
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact_name }}
+          path: dist/${{ matrix.exe_name }}
+
+  release:
+    # Only create a GitHub Release when a version tag is pushed (e.g. v1.0.0).
+    # Regular pushes to main just build and test — artifacts are available
+    # from the Actions tab without cluttering the Releases page.
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: ./artifacts
+
+      - name: Create release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ./artifacts/**/*
+          generate_release_notes: true
+          body: |
+            Standalone executables — no Python needed. Download for your OS,
+            then run `mesh-to-cad your-file.stl`.
+
+            See CHANGELOG.md for what changed.
