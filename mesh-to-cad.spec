@@ -26,6 +26,12 @@ a = Analysis(
     pathex=['.', 'scripts'],
     binaries=[],
     datas=[
+        # Bundle scripts/ as data files — the CLI resolves SCRIPTS_DIR via
+        # sys._MEIPASS at runtime and imports from there. WHY both pathex
+        # AND datas: pathex lets PyInstaller find the modules for bundling,
+        # datas ensures the .py files exist on disk in the frozen app.
+        # Belt and suspenders — the import works either way.
+        ('scripts', 'scripts'),
         # Ship the docs with the exe so --help-adjacent info is available.
         # WHY: a user with just the .exe has no repo; bundle the essentials.
         ('QUICKSTART.md', '.'),
