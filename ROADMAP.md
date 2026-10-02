@@ -39,6 +39,7 @@ Not everyone can use a command-line tool. We build for the people with the fewes
 - **Next:** Simple GUI — file picker, Run button, progress bar, plain-English results. Tkinter (zero new dependencies, works everywhere).
 - **Later:** Package managers (Chocolatey, Homebrew) — `choco install mesh-to-cad`
 - **Eventually:** Ports to other platforms/languages where the need exists. Low priority by user count, high priority by principle — the people with the fewest options appreciate it most.
+- **Spoken languages:** All-inclusive means all languages. UI strings via gettext, community-contributable translations. Spanish first (large maker community), then wherever contributors take it.
 
 ## What we won't do
 
