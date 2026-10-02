@@ -31,6 +31,15 @@ mesh-to-cad started as a 3D printing tool, but the core idea — *don't ask if i
 - **Video production** — the GruntAndMuse show itself will use this pipeline
 - **Reverse engineering** — document and reproduce physical parts
 
+## Accessibility roadmap
+
+Not everyone can use a command-line tool. We build for the people with the fewest options first:
+
+- **Now:** Standalone executables (no Python needed) + QUICKSTART with screenshots
+- **Next:** Simple GUI — file picker, Run button, progress bar, plain-English results. Tkinter (zero new dependencies, works everywhere).
+- **Later:** Package managers (Chocolatey, Homebrew) — `choco install mesh-to-cad`
+- **Eventually:** Ports to other platforms/languages where the need exists. Low priority by user count, high priority by principle — the people with the fewest options appreciate it most.
+
 ## What we won't do
 
 - We won't add cloud features. Your files stay on your machine. Ever.
