@@ -1,0 +1,29 @@
+# Phase 1 automation scripts — mesh-to-CAD pipeline
+#
+# WHY THIS FILE EXISTS: these scripts run in a Python virtualenv (not the
+# system Python) because the system Python is externally managed (PEP 668)
+# and won't accept pip installs. The venv lives at ../.venv/ (git-ignored;
+# it's an environment, not source).
+#
+# SETUP (one time):
+#   python3 -m venv ../.venv
+#   ../.venv/bin/pip install -r requirements.txt
+#
+# Then run scripts as: ../.venv/bin/python check_units.py <mesh>
+#
+# WHY THESE VERSION PINS ARE LOOSE (>=, not ==): this is a FOSS pipeline meant
+# to be forked on random laptops in 2027. Exact pins rot; loose floors keep
+# working. If a future trimesh breaks an API we use, pin it then and document
+# why — don't pre-pin out of fear.
+
+trimesh>=4.0      # mesh I/O, bounds, split, hole fill, sections
+numpy>=1.24       # all numeric work
+scipy>=1.10       # cKDTree (symmetry check), spatial queries
+networkx>=3.0     # required by trimesh.repair.fill_holes (boundary loops)
+
+# NOT INCLUDED (deliberate):
+# - open3d (~500MB): we implement Taubin smoothing in numpy (quality_gate.py)
+#   rather than drag in half a gigabyte for one filter. See the script's
+#   docstring for the full reasoning.
+# - pymeshlab: scripted MeshLab for Stage 1 cleanup is Phase 2+ work; pin it
+#   when a script actually imports it.
