@@ -40,6 +40,7 @@ Not everyone can use a command-line tool. We build for the people with the fewes
 - **Later:** Package managers (Chocolatey, Homebrew) — `choco install mesh-to-cad`
 - **Eventually:** Ports to other platforms/languages where the need exists. Low priority by user count, high priority by principle — the people with the fewest options appreciate it most.
 - **Spoken languages:** All-inclusive means all languages. UI strings via gettext, community-contributable translations. Spanish first (large maker community), then wherever contributors take it.
+- **Voice output:** Local text-to-speech (Piper TTS — FOSS, offline, private). Every pipeline gets a `--voice` flag that reads results aloud. No cloud, no privacy compromise. (Dennis, 2026-10-02: "Any software we have to write to make it work is worth the effort.")
 
 ## What we won't do
 
