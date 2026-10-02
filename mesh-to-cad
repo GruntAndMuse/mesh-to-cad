@@ -55,12 +55,35 @@ from datetime import date
 from pathlib import Path
 
 # ---------------------------------------------------------------------------
+# Windows console encoding: the CLI prints Unicode symbols (✓ ✗ ⚠ × —).
+# On Windows, the console defaults to cp1252, which can't encode these —
+# Python < 3.15 raises UnicodeEncodeError and the whole pipeline crashes
+# with a traceback instead of a verdict. Reconfigure stdout/stderr to UTF-8
+# at startup so the symbols work on every platform. On Linux/Mac this is a
+# harmless no-op (they're already UTF-8). WHY HERE AND NOT IN EACH SCRIPT:
+# this is the single entry point — every subcommand flows through it.
+# ---------------------------------------------------------------------------
+if sys.platform == "win32":
+    try:
+        sys.stdout.reconfigure(encoding="utf-8")
+        sys.stderr.reconfigure(encoding="utf-8")
+    except Exception:
+        pass  # very old Python; symbols may render as ? but won't crash
+
+# ---------------------------------------------------------------------------
 # Bootstrap: find the scripts/ directory relative to this file, no matter
 # where it's invoked from. WHY: users will run this from anywhere
 # (~/Downloads, ~/Desktop). Hardcoding a path breaks the moment the repo
 # moves. Resolving relative to __file__ means it works from any cwd.
+#
+# PyInstaller note: when frozen into a one-file exe, __file__ points to a
+# temp extraction dir and bundled data lives in sys._MEIPASS. Handle both.
 # ---------------------------------------------------------------------------
-CLI_DIR = Path(__file__).resolve().parent
+if getattr(sys, "frozen", False):
+    # Running as a PyInstaller bundle — data files are in _MEIPASS
+    CLI_DIR = Path(sys._MEIPASS)
+else:
+    CLI_DIR = Path(__file__).resolve().parent
 SCRIPTS_DIR = CLI_DIR / "scripts"
 if str(SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_DIR))
@@ -245,7 +268,7 @@ def cmd_analyze(mesh_path: Path, out_dir: Path | None = None,
     aligned_path = target_dir / f"{mesh_path.stem}_aligned.stl"
     aligned.export(str(aligned_path))
     result["aligned_mesh"] = str(aligned_path)
-    json_path.write_text(json.dumps(result, indent=2))
+    json_path.write_text(json.dumps(result, indent=2), encoding="utf-8")
 
     if not as_json:
         bb = result["bounding_box_mm"]["extents"]
@@ -421,7 +444,7 @@ def cmd_full(mesh_path: Path, project_dir: Path | None = None,
         print("  No pipeline fixes missing data — rescan the part, then")
         print("  run mesh-to-cad on the new scan.")
         manifest_path = project_dir / "manifest.json"
-        manifest_path.write_text(json.dumps(manifest, indent=2))
+        manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
         print(f"\n  Manifest saved: {manifest_path}")
         sys.exit(2)
     step_ok(f"verdict: {gate['verdict']}")
@@ -446,7 +469,7 @@ def cmd_full(mesh_path: Path, project_dir: Path | None = None,
     except Exception:
         pass
     manifest_path = project_dir / "manifest.json"
-    manifest_path.write_text(json.dumps(manifest, indent=2))
+    manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
 
     # --- Done: summary + next steps ---
     print(f"\n{'='*60}")
