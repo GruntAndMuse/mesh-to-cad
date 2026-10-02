@@ -11,6 +11,15 @@
 
 $ErrorActionPreference = "Stop"
 
+# Log everything to a file so we can diagnose if the window closes
+$logFile = "$env:TEMP\mesh-to-cad-build.log"
+"=== Build started: $(Get-Date) ===" | Out-File $logFile
+function Log($msg) {
+    $msg | Tee-Object -FilePath $logFile -Append | Write-Host
+}
+
+try {
+
 Write-Host ""
 Write-Host "=== mesh-to-cad Windows Builder ===" -ForegroundColor Cyan
 Write-Host ""
@@ -88,3 +97,16 @@ Write-Host "    `"$dest`" your-file.stl" -ForegroundColor Gray
 Write-Host ""
 Write-Host "  Smoke test:" -ForegroundColor White
 & $dest --help 2>&1 | Select-Object -First 5
+
+} catch {
+    Write-Host ""
+    Write-Host "=== BUILD FAILED ===" -ForegroundColor Red
+    Write-Host "Error: $_" -ForegroundColor Red
+    Write-Host ""
+    Write-Host "Full log saved to: $logFile" -ForegroundColor Yellow
+    Write-Host "Paste the last 20 lines of that file here and I'll diagnose it." -ForegroundColor Yellow
+} finally {
+    Write-Host ""
+    Write-Host "Press Enter to close..." -ForegroundColor Cyan
+    Read-Host | Out-Null
+}
