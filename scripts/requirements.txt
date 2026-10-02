@@ -11,6 +11,12 @@
 #
 # Then run scripts as: ../.venv/bin/python check_units.py <mesh>
 #
+# REPRODUCIBLE BUILDS: requirements-locked.txt pins the exact versions this
+# pipeline was tested against. Use it when you need a bit-for-bit
+# reproducible or auditable environment:
+#   ../.venv/bin/pip install -r requirements-locked.txt
+# Regenerate it (pip freeze) whenever dependencies change.
+#
 # WHY THESE VERSION PINS ARE LOOSE (>=, not ==): this is a FOSS pipeline meant
 # to be forked on random laptops in 2027. Exact pins rot; loose floors keep
 # working. If a future trimesh breaks an API we use, pin it then and document

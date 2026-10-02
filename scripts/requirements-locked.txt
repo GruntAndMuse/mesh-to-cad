@@ -1,0 +1,17 @@
+# Locked dependency versions — mesh-to-CAD pipeline
+#
+# EXACT versions the pipeline was tested against (2026-10-02).
+# Use this file when you need a bit-for-bit reproducible environment:
+#
+#   ../.venv/bin/pip install -r requirements-locked.txt
+#
+# requirements.txt carries the loose floors (>=) for forkability on new
+# machines; this file carries the exact tested set for auditability.
+# Regenerate after any dependency change and note the date above.
+
+manifold3d==3.5.4  # test-fixture generation ONLY (synthetic test models);
+                   # not imported by any pipeline script or the CLI
+networkx==3.7      # required by trimesh.repair.fill_holes
+numpy==2.5.3       # all numeric work
+scipy==1.18.1      # cKDTree (symmetry check), spatial queries
+trimesh==5.1.0     # mesh I/O, bounds, split, hole fill, sections

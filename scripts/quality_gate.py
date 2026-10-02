@@ -33,8 +33,11 @@ THE FOUR METRICS (and what each one is really measuring):
        pipeline's tolerances — proceed, but expect the organic track.
     4. component_count (int) — number of disconnected pieces (trimesh.split).
        1 is normal. More means floating triangles, double-scanned fragments, or
-       the turntable got scanned too. Informational: cleanup removes them, but
-       a high count warns the scan session was messy.
+       the turntable got scanned too. Above COMPONENT_NOISY_COUNT (10) the
+       verdict drops to `noisy`: the geometry is usually intact (so not a
+       rescan), but Stage 1 MUST isolate the part before downstream stages
+       trust the mesh. (Was purely informational until 2026-10-02, when a
+       300-component Benchy read "clean.")
 
 WHY TAUBIN SMOOTHING (AND NOT PLAIN LAPLACIAN):
     Plain Laplacian smoothing shrinks the mesh toward its centroid — after
@@ -63,6 +66,7 @@ THRESHOLDS — TUNE THESE ON REAL DATA:
 USAGE:
     python quality_gate.py work/bracket_clean.stl
     python quality_gate.py work/bracket_clean.stl --json   # machine-readable
+    python quality_gate.py --help                          # this text
 
 EXIT CODES:
     0 — verdict `clean` or `noisy` (proceed)
@@ -85,6 +89,22 @@ import trimesh
 # ---------------------------------------------------------------------------
 HOLE_FILL_RESCAN_FRACTION = 0.05  # >5% invented surface -> needs-rescan
 NOISE_MM_WARN = 0.3               # mean noise above this -> "noisy" verdict
+
+# Fragmentation threshold: more disconnected components than this -> "noisy".
+# WHY 10: 1 component is a clean single part; 2-3 is a part plus a couple of
+# floating triangles (normal scan debris, cleanup handles it silently). Past
+# ~10 the scan session was genuinely messy — turntable scanned, double-scan
+# fragments, shattered shells — and Stage 1 cleanup MUST isolate the part
+# before anything downstream trusts the mesh. (The Benchy mirror that
+# motivated this had 300 components and still read "clean" — 2026-10-02.)
+# WHY "noisy" AND NOT "needs-rescan": fragmentation is a cleanup problem, not
+# missing data. The primary component's geometry is usually intact; rescan is
+# for geometry the scanner never captured. "Noisy" = proceed with caution,
+# which is exactly what a fragmented scan needs. Multi-part assemblies will
+# also trip this — honestly, since an assembly ISN'T a single part and the
+# pipeline works per-part. Like all thresholds here: a starting hypothesis,
+# tune on real Raptor Pro scans.
+COMPONENT_NOISY_COUNT = 10
 
 # Taubin smoothing parameters (Taubin 1995). lambda > 0 inflates, mu < 0
 # deflates; |mu| slightly larger than lambda gives the volume-preserving
@@ -287,7 +307,17 @@ def quality_gate(mesh_path: Path) -> dict:
     hole_fraction = holes["fraction"]  # None if fill was unavailable
     noise_mean = noise["mean_mm"] if noise else None
 
-    if hole_fraction is None:
+    # Empty mesh: no geometry at all. This is "stop," not "clean" — there is
+    # nothing to build CAD from. (Found 2026-10-02: an empty file read
+    # "clean" because every metric trivially passed. Metrics passing on
+    # nothing is not the same as a good scan.)
+    if len(mesh.faces) == 0:
+        verdict = "needs-rescan"
+        reasons.append(
+            "file contains no geometry (0 faces) — empty mesh, nothing to "
+            "build CAD from. Check the export or re-download the file."
+        )
+    elif hole_fraction is None:
         verdict = "needs-rescan"
         reasons.append(
             f"hole-fill metric unavailable ({holes.get('unavailable', 'unknown reason')}) — "
@@ -305,6 +335,16 @@ def quality_gate(mesh_path: Path) -> dict:
         reasons.append(
             f"mean noise {noise_mean} mm exceeds {NOISE_MM_WARN} mm — "
             "proceed, but prefer the organic track and expect fitting effort."
+        )
+    elif component_count > COMPONENT_NOISY_COUNT:
+        # Fragmented scan: many disconnected shells. Not missing data
+        # (that's needs-rescan), but the session was messy and Stage 1 must
+        # isolate the real part. See the threshold comment for WHY noisy.
+        verdict = "noisy"
+        reasons.append(
+            f"{component_count} disconnected components exceeds "
+            f"{COMPONENT_NOISY_COUNT} — fragmented scan; Stage 1 cleanup "
+            "must isolate the part before downstream stages trust the mesh."
         )
     else:
         verdict = "clean"
@@ -348,6 +388,11 @@ def quality_gate(mesh_path: Path) -> dict:
 
 
 def main() -> None:
+    # --help / -h: print the module docstring and exit 0, before arg parsing
+    # so it never falls through to "not found: --help".
+    if "--help" in sys.argv[1:] or "-h" in sys.argv[1:]:
+        print(__doc__)
+        sys.exit(0)
     args = [a for a in sys.argv[1:] if a != "--json"]
     as_json = "--json" in sys.argv[1:]
     if len(args) != 1:

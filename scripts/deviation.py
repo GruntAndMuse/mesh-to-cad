@@ -67,6 +67,7 @@ USAGE:
     --max-dist MM    cap per-point distances (default: 5.0)
     --json           machine-readable output
     --cc-bin PATH    CloudCompare binary (default: search PATH for CloudCompare)
+    --help           print this text
 
 EXIT CODES:
     0 — measurement succeeded (and passed tolerance, if given)
@@ -276,6 +277,13 @@ def measure_clean(model_mesh: Path, ref_mesh: Path, max_dist: float,
 
 def main() -> None:
     argv = sys.argv[1:]
+    # --help / -h: print the module docstring and exit 0, before the flag
+    # loop below (which would otherwise swallow --help as a positional and
+    # exit 1 with a usage dump — technically helpful, but exit 1 on --help
+    # breaks the scripts/README.md contract).
+    if "--help" in argv or "-h" in argv:
+        print(__doc__)
+        sys.exit(0)
     as_json = "--json" in argv
     argv = [a for a in argv if a != "--json"]
     tolerance = None

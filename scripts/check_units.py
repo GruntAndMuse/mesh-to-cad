@@ -46,6 +46,7 @@ WHY THESE THRESHOLDS:
 USAGE:
     python check_units.py work/bracket_clean.stl
     python check_units.py work/bracket_clean.stl --json   # machine-readable
+    python check_units.py --help                          # this text
 
 EXIT CODES:
     0 — a suggestion was produced (check the confidence field)
@@ -84,6 +85,15 @@ def suggest_units(mesh_path: Path) -> dict:
     # force="mesh": trimesh.load can return a Scene for some formats; we want
     # the raw triangle soup so bounds are always computable.
     mesh = trimesh.load(str(mesh_path), force="mesh")
+    # Empty-file guard: a 0-byte (or geometry-free) file loads as an empty
+    # mesh whose .bounds is None — indexing it raises a bare TypeError
+    # traceback. That's a bug report waiting to happen; fail fast with a
+    # clear message instead. (Found 2026-10-02, edge-case shakedown.)
+    if len(mesh.faces) == 0:
+        raise ValueError(
+            f"{mesh_path} contains no geometry (0 faces) — not a usable mesh. "
+            "Check the export or re-download the file."
+        )
     extents = mesh.bounds[1] - mesh.bounds[0]
     diagonal = float(np.linalg.norm(extents))
 
@@ -138,6 +148,11 @@ def suggest_units(mesh_path: Path) -> dict:
 
 
 def main() -> None:
+    # --help / -h: print the module docstring and exit 0, before arg parsing
+    # so it never falls through to "not found: --help".
+    if "--help" in sys.argv[1:] or "-h" in sys.argv[1:]:
+        print(__doc__)
+        sys.exit(0)
     args = [a for a in sys.argv[1:] if a != "--json"]
     as_json = "--json" in sys.argv[1:]
     if len(args) != 1:
@@ -148,7 +163,13 @@ def main() -> None:
         print(f"not found: {mesh_path}", file=sys.stderr)
         sys.exit(1)
 
-    result = suggest_units(mesh_path)
+    try:
+        result = suggest_units(mesh_path)
+    except ValueError as e:
+        # Includes the empty-mesh guard above: user-facing error, not a
+        # traceback. Exit 1 = usage/input problem (see module docstring).
+        print(f"error: {e}", file=sys.stderr)
+        sys.exit(1)
     if as_json:
         print(json.dumps(result, indent=2))
     else:

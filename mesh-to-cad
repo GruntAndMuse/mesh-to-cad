@@ -1,0 +1,644 @@
+#!/usr/bin/env python3
+"""
+mesh-to-cad — the one command for the mesh-to-CAD pipeline.
+
+WHAT THIS IS:
+    The single entry point for the entire pipeline. You learn one command,
+    not four scripts. It runs intake (units check), quality gate, and
+    analysis in sequence, sets up the project folder, and tells you what
+    to do next.
+
+    Individual scripts in scripts/ still exist — they're the modules this
+    calls internally. You never need to run them directly.
+
+USAGE:
+    mesh-to-cad myfile.stl                  # full pipeline: intake -> gate -> analysis
+    mesh-to-cad units myfile.stl            # just the units check
+    mesh-to-cad check myfile.stl            # just the quality gate
+    mesh-to-cad analyze myfile.stl          # just the analysis
+    mesh-to-cad deviation model.stl ref.stl # deviation check (needs CloudCompare)
+    mesh-to-cad --help                      # this text
+
+WHY ONE COMMAND:
+    Dennis's rule: "as close to 1 thing that does everything as possible,
+    we don't want 2 programs to do 1 task." Four scripts doing one pipeline
+    is four chances to run them in the wrong order, forget a step, or pass
+    the wrong file. One command can't be misordered.
+
+    Think of it like git: one binary, subcommands for the pieces, but the
+    default does the common thing.
+
+EXIT CODES:
+    0 — pipeline completed (or subcommand succeeded)
+    1 — usage error, missing file, unreadable mesh, missing dependency
+    2 — quality gate says needs-rescan, or deviation failed tolerance.
+        The pipeline STOPPED ON PURPOSE — read the message, it tells you why.
+
+PROJECT LAYOUT (created by the full run):
+    <project>/
+    ├── manifest.json              # source, decisions, tolerances, tool versions
+    ├── input/<name>.stl           # YOUR ORIGINAL — never modified
+    ├── analysis/<name>_measurements.json
+    └── analysis/<name>_aligned.stl
+
+    The next manual steps (MeshLab cleanup -> CAD rebuild) are printed at
+    the end of every run. The pipeline guides; you decide.
+
+Requires: trimesh, numpy, scipy, networkx (see scripts/requirements.txt).
+CloudCompare only needed for the `deviation` subcommand.
+"""
+import json
+import shutil
+import sys
+import traceback
+from datetime import date
+from pathlib import Path
+
+# ---------------------------------------------------------------------------
+# Bootstrap: find the scripts/ directory relative to this file, no matter
+# where it's invoked from. WHY: users will run this from anywhere
+# (~/Downloads, ~/Desktop). Hardcoding a path breaks the moment the repo
+# moves. Resolving relative to __file__ means it works from any cwd.
+# ---------------------------------------------------------------------------
+CLI_DIR = Path(__file__).resolve().parent
+SCRIPTS_DIR = CLI_DIR / "scripts"
+if str(SCRIPTS_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPTS_DIR))
+
+# Friendly import errors: if the venv isn't set up, the user gets a
+# traceback about "No module named 'trimesh'". That's accurate but useless
+# to a beginner. Catch it and tell them what to DO.
+try:
+    import check_units
+    import quality_gate
+    import analyze as analyze_mod
+except ImportError as e:
+    missing = str(e).split("'")[1] if "'" in str(e) else str(e)
+    print(f"error: missing Python package '{missing}'.", file=sys.stderr)
+    print("", file=sys.stderr)
+    print("  This usually means the virtual environment isn't set up yet.", file=sys.stderr)
+    print("  Run these two commands once (from the mesh-to-cad folder):", file=sys.stderr)
+    print("", file=sys.stderr)
+    print("    python3 -m venv .venv", file=sys.stderr)
+    print("    .venv/bin/pip install -r scripts/requirements.txt", file=sys.stderr)
+    print("", file=sys.stderr)
+    print("  Then run mesh-to-cad with the venv's Python:", file=sys.stderr)
+    print("    .venv/bin/python mesh-to-cad myfile.stl", file=sys.stderr)
+    sys.exit(1)
+
+# ---------------------------------------------------------------------------
+# Constants
+# ---------------------------------------------------------------------------
+ACCEPTED_EXTENSIONS = {".stl", ".ply", ".obj", ".3mf"}
+# WHY THESE FOUR: they're what the pipeline's SOP accepts (Stage 0). STL is
+# the 3D-printing lingua franca; PLY/OBJ come from scanners and downloads;
+# 3MF is the modern replacement. Anything else (STEP, FCStd, etc.) is either
+# already CAD (you don't need this pipeline) or an image (wrong tool).
+
+VERSION = "0.1.0"  # Phase 1
+
+
+# ---------------------------------------------------------------------------
+# Friendly error helpers
+# ---------------------------------------------------------------------------
+def die(message: str, hint: str = "", code: int = 1) -> None:
+    """Print an error a beginner can act on, then exit.
+
+    WHY THIS EXISTS: a raw traceback tells a beginner "something broke in
+    code you didn't write." A friendly error tells them what happened and
+    what to do. Every error path in this CLI goes through here so the
+    experience is consistent: problem, then fix.
+    """
+    print(f"\nerror: {message}", file=sys.stderr)
+    if hint:
+        print(f"\n  {hint}", file=sys.stderr)
+    sys.exit(code)
+
+
+def check_file(path_str: str) -> Path:
+    """Validate the input file exists and is a mesh format we handle.
+
+    Returns the Path. Dies with a helpful message otherwise.
+    """
+    p = Path(path_str)
+    if not p.exists():
+        die(
+            f"file not found: {path_str}",
+            "Check the path — did you mean a file in this folder? "
+            "Use 'ls' (Mac/Linux) or 'dir' (Windows) to see what's here.",
+        )
+    if p.suffix.lower() not in ACCEPTED_EXTENSIONS:
+        die(
+            f"wrong file type: '{p.suffix or '(no extension)'}' — "
+            f"expected one of {sorted(ACCEPTED_EXTENSIONS)}.",
+            f"If this is a CAD file (.step, .FCStd), you don't need this "
+            f"pipeline — it's already CAD. If it's a mesh in another format, "
+            f"open it in MeshLab (free) and export as .stl first.",
+        )
+    return p
+
+
+def step_header(n: int, total: int, title: str) -> None:
+    """Print a clear step marker. WHY: beginners need to know where they are
+    in a multi-step process. 'Step 2/3' is a map; silence is a maze."""
+    print(f"\n{'='*60}")
+    print(f"  Step {n}/{total}: {title}")
+    print(f"{'='*60}")
+
+
+def step_ok(message: str = "") -> None:
+    print(f"  ✓ {message}" if message else "  ✓ done")
+
+
+# ---------------------------------------------------------------------------
+# Subcommand: units
+# ---------------------------------------------------------------------------
+def cmd_units(mesh_path: Path, as_json: bool = False) -> dict:
+    """Run the units check. Returns the result dict."""
+    try:
+        result = check_units.suggest_units(mesh_path)
+    except Exception as e:
+        die(
+            f"couldn't read the mesh: {e}",
+            "The file might be corrupted, or in a format variant trimesh "
+            "can't parse. Try opening it in MeshLab — if MeshLab can't open "
+            "it either, the file is bad.",
+        )
+    if as_json:
+        print(json.dumps(result, indent=2))
+    else:
+        print(f"  file:       {result['file']}")
+        print(f"  size:       {result['diagonal_file_units']} units diagonal")
+        print(f"  extents:    {result['extents_file_units']}")
+        print(f"  suggestion: {result['suggestion']} "
+              f"(×{result['scale_factor']}, confidence: {result['confidence']})")
+        if "scale_factor_alt" in result:
+            print(f"  also possible: ×{result['scale_factor_alt']}")
+        print(f"  why: {result['why']}")
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Subcommand: check (quality gate)
+# ---------------------------------------------------------------------------
+def cmd_check(mesh_path: Path, as_json: bool = False) -> dict:
+    """Run the quality gate. Returns the result dict. Dies with code 2 on
+    needs-rescan (the pipeline stops on purpose — the message says why)."""
+    try:
+        result = quality_gate.quality_gate(mesh_path)
+    except Exception as e:
+        die(
+            f"quality check crashed: {e}",
+            "This is a bug, not your fault. Please report it at "
+            "https://github.com/GruntAndMuse/mesh-to-cad/issues with the "
+            "file that triggered it (if you can share it).",
+        )
+    verdict = result["verdict"]
+    if as_json:
+        print(json.dumps(result, indent=2))
+    else:
+        print(f"  verts/faces: {result['vertices']} / {result['faces']}")
+        print(f"  watertight:  {result['is_watertight']}")
+        hf = result["hole_fill"]
+        if hf["fraction"] is None:
+            print(f"  hole-fill:   couldn't measure ({hf.get('unavailable')})")
+        else:
+            print(f"  hole-fill:   {hf['fraction']:.2%} of surface would be invented")
+        nz = result["noise"]
+        if nz is None:
+            print("  noise:       n/a (mesh too coarse to estimate)")
+        else:
+            print(f"  noise:       {nz['mean_mm']} mm average")
+        print(f"  components:  {result['component_count']}")
+        print()
+        if verdict == "clean":
+            print("  VERDICT: CLEAN ✓ — this mesh is good to work with.")
+        elif verdict == "noisy":
+            print("  VERDICT: NOISY ⚠ — usable, but expect extra cleanup.")
+        else:
+            print("  VERDICT: NEEDS-RESCAN ✗ — stop here.")
+        for r in result["reasons"]:
+            print(f"    • {r}")
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Subcommand: analyze
+# ---------------------------------------------------------------------------
+def cmd_analyze(mesh_path: Path, out_dir: Path | None = None,
+                as_json: bool = False) -> dict:
+    """Run analysis. Writes measurements JSON + aligned STL next to the input
+    (or into out_dir if given). Returns the result dict."""
+    try:
+        result, aligned = analyze_mod.analyze(mesh_path)
+    except Exception as e:
+        die(
+            f"analysis crashed: {e}",
+            "This is a bug, not your fault. Please report it at "
+            "https://github.com/GruntAndMuse/mesh-to-cad/issues with the "
+            "file that triggered it (if you can share it).",
+        )
+    target_dir = out_dir or mesh_path.parent
+    target_dir.mkdir(parents=True, exist_ok=True)
+
+    json_path = target_dir / f"{mesh_path.stem}_measurements.json"
+    aligned_path = target_dir / f"{mesh_path.stem}_aligned.stl"
+    aligned.export(str(aligned_path))
+    result["aligned_mesh"] = str(aligned_path)
+    json_path.write_text(json.dumps(result, indent=2))
+
+    if not as_json:
+        bb = result["bounding_box_mm"]["extents"]
+        print(f"  size:        {bb[0]} × {bb[1]} × {bb[2]} mm")
+        print(f"  track:       {result['track_decision']} "
+              f"(confidence: {result['track_confidence']})")
+        print(f"  why:         {result['track_reason']}")
+        planes = result.get("dominant_planes", [])
+        if planes:
+            print(f"  flat faces:  {len(planes)} dominant plane(s) found")
+        sym = result.get("symmetry", {})
+        sym_planes = [k for k, v in sym.items()
+                      if isinstance(v, dict) and v.get("symmetric")]
+        if sym_planes:
+            print(f"  symmetry:    mirror-symmetric across {', '.join(sym_planes)}")
+        print(f"\n  wrote: {json_path}")
+        print(f"  wrote: {aligned_path}")
+    else:
+        print(json.dumps(result, indent=2))
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Subcommand: deviation
+# ---------------------------------------------------------------------------
+def cmd_deviation(model_path: Path, ref_path: Path,
+                  tolerance: float | None = None,
+                  as_json: bool = False) -> dict:
+    """Run CloudCompare deviation check. Dies with code 2 on tolerance FAIL."""
+    # Import here, not at top: deviation.py imports numpy at module level
+    # (fine), but we want the CloudCompare-missing error to be friendly.
+    try:
+        import deviation as dev_mod
+    except ImportError as e:
+        die(f"couldn't load deviation module: {e}")
+
+    try:
+        stats = dev_mod.measure_clean(model_path, ref_path, 5.0, None)
+    except FileNotFoundError as e:
+        # This is the CloudCompare-missing path (or no output cloud found).
+        msg = str(e)
+        if "CloudCompare not found" in msg:
+            die(
+                "CloudCompare isn't installed (or isn't on PATH).",
+                "Download it free from https://www.cloudcompare.org/ — "
+                "install, then make sure you can run 'CloudCompare' from "
+                "a terminal. On Windows, add its install folder to PATH, "
+                "or pass --cc-bin \"C:\\path\\to\\CloudCompare.exe\".",
+            )
+        die(f"deviation measurement failed: {msg}")
+    except RuntimeError as e:
+        die(
+            f"CloudCompare ran but failed: {e}",
+            "Check that both files are valid meshes. If they are, this may "
+            "be a CloudCompare version issue — report it at "
+            "https://github.com/GruntAndMuse/mesh-to-cad/issues",
+        )
+    except ValueError as e:
+        die(f"couldn't parse CloudCompare output: {e}")
+
+    passed = True
+    if tolerance is not None:
+        passed = stats["max_mm"] <= tolerance
+
+    if as_json:
+        out = dict(stats)
+        if tolerance is not None:
+            out["tolerance_mm"] = tolerance
+            out["passed"] = bool(passed)
+        print(json.dumps(out, indent=2))
+    else:
+        print(f"  max deviation:  {stats['max_mm']} mm")
+        print(f"  mean deviation: {stats['mean_mm']} mm")
+        print(f"  p95 deviation:  {stats['p95_mm']} mm")
+        if tolerance is not None:
+            if passed:
+                print(f"\n  PASS ✓ — max {stats['max_mm']} mm ≤ {tolerance} mm tolerance")
+            else:
+                print(f"\n  FAIL ✗ — max {stats['max_mm']} mm > {tolerance} mm tolerance")
+                print("  The model needs more work before it's within tolerance.")
+
+    if tolerance is not None and not passed:
+        sys.exit(2)
+    return stats
+
+
+# ---------------------------------------------------------------------------
+# Full pipeline: intake -> quality gate -> analysis
+# ---------------------------------------------------------------------------
+def cmd_full(mesh_path: Path, project_dir: Path | None = None,
+             as_json: bool = False) -> None:
+    """Run the complete Phase 1 pipeline on one file.
+
+    WHY THIS ORDER: units first (a 1000x error corrupts everything after it),
+    then quality (no point measuring a mesh that's missing half its surface),
+    then analysis (the numbers everything downstream is judged against).
+    Each step can stop the pipeline — that's the point. A pipeline that
+    can't say "stop" isn't a pipeline, it's a hope.
+    """
+    # --- Project setup ---
+    # WHY A PROJECT FOLDER: the pipeline's SOP tracks input/work/analysis/
+    # per project. Dumping outputs next to the input works for one file but
+    # collapses the moment you process two versions. Default: a folder named
+    # after the file, next to the file. Override with --output.
+    if project_dir is None:
+        project_dir = mesh_path.parent / mesh_path.stem
+    input_dir = project_dir / "input"
+    analysis_dir = project_dir / "analysis"
+    input_dir.mkdir(parents=True, exist_ok=True)
+    analysis_dir.mkdir(parents=True, exist_ok=True)
+
+    # Copy the original into input/. WHY A COPY: the SOP's first rule is
+    # "never modify the original." If the input file IS already in input/
+    # (re-run), skip the copy — copying a file onto itself is a no-op but
+    # the message would confuse.
+    input_copy = input_dir / mesh_path.name
+    if mesh_path.resolve() != input_copy.resolve():
+        shutil.copy2(mesh_path, input_copy)
+        print(f"  copied original -> {input_copy}")
+    else:
+        print(f"  input already in project: {input_copy}")
+    working_file = input_copy
+
+    manifest = {
+        "project": project_dir.name,
+        "tool": f"mesh-to-cad {VERSION}",
+        "date": str(date.today()),
+        "source": {
+            "original_file": str(input_copy),
+            "units": "mm (pending confirmation)",
+        },
+    }
+
+    # --- Step 1: Units ---
+    step_header(1, 3, "Checking units")
+    units = cmd_units(working_file, as_json=False)
+    manifest["source"]["units_check"] = {
+        "suggestion": units["suggestion"],
+        "scale_factor": units["scale_factor"],
+        "confidence": units["confidence"],
+    }
+    if units["suggestion"] == "millimeters":
+        step_ok("units look like millimeters — proceeding")
+    else:
+        # WHY STOP AND ASK: a wrong scale factor silently corrupts every
+        # downstream number. The script suggests; the human confirms. This
+        # is the one place in Phase 1 where the pipeline refuses to guess.
+        print()
+        print("  ⚠ Units need your confirmation before continuing.")
+        print(f"  Suggestion: {units['suggestion']} (×{units['scale_factor']})")
+        print(f"  {units['why']}")
+        print()
+        answer = input("  Is this correct? [y/N] ").strip().lower()
+        if answer not in ("y", "yes"):
+            print("\n  Stopped. No files were modified.")
+            print("  If you know the correct units, convert the file first")
+            print("  (MeshLab: Filters > Normals, Curvatures > Transform: Scale),")
+            print("  then run mesh-to-cad again.")
+            sys.exit(1)
+        step_ok("units confirmed by user")
+        manifest["source"]["units"] = f"mm (confirmed, scale ×{units['scale_factor']})"
+
+    # --- Step 2: Quality gate ---
+    step_header(2, 3, "Quality gate")
+    gate = cmd_check(working_file, as_json=False)
+    manifest["quality"] = gate["verdict"]
+    manifest["quality_reasons"] = gate["reasons"]
+    if gate["verdict"] == "needs-rescan":
+        # Exit 2, not 1: SOP scripts can distinguish "pipeline stopped on
+        # purpose" (2) from "something broke" (1). The message above already
+        # told the user why — this just makes it machine-readable.
+        print("\n  The pipeline stopped here ON PURPOSE.")
+        print("  No pipeline fixes missing data — rescan the part, then")
+        print("  run mesh-to-cad on the new scan.")
+        manifest_path = project_dir / "manifest.json"
+        manifest_path.write_text(json.dumps(manifest, indent=2))
+        print(f"\n  Manifest saved: {manifest_path}")
+        sys.exit(2)
+    step_ok(f"verdict: {gate['verdict']}")
+
+    # --- Step 3: Analysis ---
+    step_header(3, 3, "Analyzing geometry")
+    analysis = cmd_analyze(working_file, out_dir=analysis_dir, as_json=False)
+    manifest["track"] = analysis["track_decision"]
+    manifest["track_confidence"] = analysis["track_confidence"]
+    manifest["track_reason"] = analysis["track_reason"]
+    step_ok("measurements recorded")
+
+    # --- Manifest ---
+    manifest["tools"] = {
+        "mesh-to-cad": VERSION,
+        # Record what we can; trimesh version is the load-bearing one.
+        "python": f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}",
+    }
+    try:
+        import trimesh as _tm
+        manifest["tools"]["trimesh"] = _tm.__version__
+    except Exception:
+        pass
+    manifest_path = project_dir / "manifest.json"
+    manifest_path.write_text(json.dumps(manifest, indent=2))
+
+    # --- Done: summary + next steps ---
+    print(f"\n{'='*60}")
+    print("  Pipeline complete ✓")
+    print(f"{'='*60}")
+    print(f"\n  Project folder: {project_dir}")
+    print(f"  Track: {analysis['track_decision']} "
+          f"(confidence: {analysis['track_confidence']})")
+    print(f"\n  What was created:")
+    print(f"    input/{mesh_path.name}         — your original (untouched)")
+    print(f"    analysis/*_measurements.json  — every number the CAD must match")
+    print(f"    analysis/*_aligned.stl         — mesh in canonical orientation")
+    print(f"    manifest.json                 — project record")
+    print(f"\n  What to do next:")
+    if analysis["track_decision"] == "prismatic":
+        print("    1. Open the mesh in FreeCAD as a reference (File > Import).")
+        print("    2. Build the part in Part Design, measuring from the mesh.")
+        print("       (Tip: MeshToFeatures workbench can automate clean meshes.)")
+        print("    3. When the model is done, verify against the ORIGINAL:")
+    elif analysis["track_decision"] == "organic":
+        print("    1. Open the mesh in FreeCAD (Curves workbench).")
+        print("    2. Build the surface, then check it with:")
+        print(f"       mesh-to-cad deviation your_model.stl {input_copy}")
+        print("    3. When the model is done, verify against the ORIGINAL:")
+    else:
+        print("    1. This part has both prismatic and organic features.")
+        print("    2. Model the prismatic base first, then the organic details.")
+        print("    3. Check each stage with:")
+        print(f"       mesh-to-cad deviation your_model.stl {input_copy}")
+        print("    4. When the model is done, verify against the ORIGINAL:")
+    print(f"       mesh-to-cad deviation final_model.stl {input_copy} --tolerance 0.3")
+    print(f"\n  Full guide: QUICKSTART.md")
+
+
+# ---------------------------------------------------------------------------
+# Help text
+# ---------------------------------------------------------------------------
+def print_help() -> None:
+    print(__doc__.strip())
+    print()
+    print("Subcommands:")
+    print("  mesh-to-cad <file>                  Run the full pipeline (default)")
+    print("  mesh-to-cad units <file>            Check units only")
+    print("  mesh-to-cad check <file>            Quality gate only")
+    print("  mesh-to-cad analyze <file>          Geometry analysis only")
+    print("  mesh-to-cad deviation model ref     Deviation check (needs CloudCompare)")
+    print()
+    print("Options:")
+    print("  --output DIR     Project folder (default: ./<filename>/)")
+    print("  --tolerance MM   Pass/fail threshold for deviation (with deviation)")
+    print("  --json           Machine-readable output (not for full pipeline)")
+    print("  --help, -h       Show this help")
+    print()
+    print("Examples:")
+    print("  mesh-to-cad bracket.stl")
+    print("      Full pipeline: units -> quality -> analysis.")
+    print()
+    print("  mesh-to-cad check scan.stl")
+    print("      Just the quality gate. Exit 2 means needs-rescan.")
+    print()
+    print("  mesh-to-cad deviation cad_v1.stl input/original.stl --tolerance 0.2")
+    print("      Is the CAD model within 0.2 mm of the original scan?")
+
+
+def print_subcommand_help(sub: str) -> None:
+    helps = {
+        "units": (
+            "mesh-to-cad units <file>\n\n"
+            "Guess the mesh's units from its bounding-box diagonal.\n"
+            "Prints a suggestion (millimeters/meters/micrometers-or-inches)\n"
+            "with confidence. Never modifies the file.\n\n"
+            "Example:\n  mesh-to-cad units bracket.stl"
+        ),
+        "check": (
+            "mesh-to-cad check <file>\n\n"
+            "Run the quality gate: watertightness, hole-fill fraction,\n"
+            "noise estimate, component count.\n"
+            "Verdict: clean (proceed) / noisy (proceed with caution) /\n"
+            "needs-rescan (stop — exit code 2).\n\n"
+            "Example:\n  mesh-to-cad check scan.stl"
+        ),
+        "analyze": (
+            "mesh-to-cad analyze <file>\n\n"
+            "Extract measurements: bounding box, planar faces, symmetry,\n"
+            "track decision (prismatic/organic/mixed) with confidence.\n"
+            "Writes <name>_measurements.json and <name>_aligned.stl\n"
+            "next to the input.\n\n"
+            "Example:\n  mesh-to-cad analyze work/bracket_clean.stl"
+        ),
+        "deviation": (
+            "mesh-to-cad deviation <model> <reference> [--tolerance MM]\n\n"
+            "CloudCompare cloud-to-mesh distance: how far is the CAD model\n"
+            "from the reference mesh? Reports max/mean/p95.\n"
+            "With --tolerance: PASS/FAIL on max deviation (exit 2 on FAIL).\n"
+            "Always compare against the ORIGINAL scan, never the cleaned one.\n\n"
+            "Requires: CloudCompare installed (https://www.cloudcompare.org/)\n\n"
+            "Example:\n"
+            "  mesh-to-cad deviation cad_v1.stl input/original.stl --tolerance 0.2"
+        ),
+    }
+    print(helps.get(sub, f"unknown subcommand: {sub}"))
+    print("\nRun 'mesh-to-cad --help' for the full command list.")
+
+
+# ---------------------------------------------------------------------------
+# Main dispatch
+# ---------------------------------------------------------------------------
+def main() -> None:
+    argv = sys.argv[1:]
+
+    # --help / -h anywhere: show help and exit 0. Checked first so --help
+    # never falls through to "file not found: --help".
+    if not argv or "--help" in argv or "-h" in argv:
+        # 'mesh-to-cad check --help' -> subcommand help; bare --help -> full.
+        subs = [a for a in argv if a in ("units", "check", "analyze", "deviation")]
+        if subs and ("--help" in argv or "-h" in argv):
+            print_subcommand_help(subs[0])
+        else:
+            print_help()
+        sys.exit(0)
+
+    # Pull out global flags before dispatch.
+    as_json = "--json" in argv
+    argv = [a for a in argv if a != "--json"]
+    output_dir = None
+    if "--output" in argv:
+        idx = argv.index("--output")
+        if idx + 1 >= len(argv):
+            die("--output needs a directory.", "Example: mesh-to-cad file.stl --output ./myproject")
+        output_dir = Path(argv[idx + 1])
+        argv = argv[:idx] + argv[idx + 2 :]
+    tolerance = None
+    if "--tolerance" in argv:
+        idx = argv.index("--tolerance")
+        if idx + 1 >= len(argv):
+            die("--tolerance needs a number in mm.", "Example: --tolerance 0.2")
+        try:
+            tolerance = float(argv[idx + 1])
+        except ValueError:
+            die(f"--tolerance needs a number, got '{argv[idx + 1]}'.",
+                "Example: --tolerance 0.2  (that's 0.2 millimeters)")
+        argv = argv[:idx] + argv[idx + 2 :]
+
+    # Dispatch: first arg is the subcommand, unless it looks like a file.
+    first = argv[0]
+    if first in ("units", "check", "analyze", "deviation"):
+        sub, rest = first, argv[1:]
+        if sub == "units":
+            if len(rest) != 1:
+                print_subcommand_help("units")
+                sys.exit(1)
+            cmd_units(check_file(rest[0]), as_json=as_json)
+        elif sub == "check":
+            if len(rest) != 1:
+                print_subcommand_help("check")
+                sys.exit(1)
+            result = cmd_check(check_file(rest[0]), as_json=as_json)
+            sys.exit(2 if result["verdict"] == "needs-rescan" else 0)
+        elif sub == "analyze":
+            if len(rest) != 1:
+                print_subcommand_help("analyze")
+                sys.exit(1)
+            cmd_analyze(check_file(rest[0]), as_json=as_json)
+        elif sub == "deviation":
+            if len(rest) != 2:
+                print_subcommand_help("deviation")
+                sys.exit(1)
+            cmd_deviation(check_file(rest[0]), check_file(rest[1]),
+                          tolerance=tolerance, as_json=as_json)
+    else:
+        # Default: full pipeline. The first arg must be a file; anything
+        # else is a usage error with guidance, not a traceback.
+        if len(argv) != 1:
+            die(
+                f"don't know what to do with: {' '.join(argv)}",
+                "Usage: mesh-to-cad <file.stl>\n"
+                "   Or: mesh-to-cad --help  (see all subcommands)",
+            )
+        if as_json:
+            die("--json doesn't apply to the full pipeline run.",
+                "Use it with a subcommand: mesh-to-cad check file.stl --json")
+        cmd_full(check_file(first), project_dir=output_dir)
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except KeyboardInterrupt:
+        # Ctrl+C mid-run: don't dump a traceback. The user stopped it on
+        # purpose; acknowledge and exit cleanly.
+        print("\n\nStopped by user (Ctrl+C). No files were harmed.", file=sys.stderr)
+        sys.exit(130)
+    except BrokenPipeError:
+        # Piped to `head` and it closed early: not an error, just exit.
+        sys.exit(0)
