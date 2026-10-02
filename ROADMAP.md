@@ -1,0 +1,43 @@
+# Roadmap
+
+Where mesh-to-cad is going. This is a living document — it changes as we learn.
+
+## Now: Phase 1 — Measure (done)
+
+The pipeline can take a mesh, validate its units, check its quality, analyze its geometry, and suggest whether it's a prismatic or organic rebuild. Every step ends with a number, not a feeling.
+
+## Next: Phase 2 — Rebuild (in progress)
+
+Automated reconstruction:
+- **RANSAC feature detection** — find holes, cylinders, and planes automatically
+- **Denoise → MeshToFeatures** — clean the mesh, extract features
+- **Primitive-to-CAD generation** — turn detected features into parametric FreeCAD/build123d models
+- **Section → spline → loft** — for organic shapes, slice the mesh and rebuild surfaces
+- **Adaptive deviation loop** — put more effort where the error is highest
+
+Goal: go from scan to editable CAD with minimal manual work.
+
+## Then: Phase 3 — Prove
+
+- Full round-trip testing on real scanner output (Creality Raptor Pro)
+- Benchmark suite with known-good models
+- Drawing generation (2D manufacturing drawings from the rebuilt CAD)
+
+## Beyond: The Bigger Picture
+
+mesh-to-cad started as a 3D printing tool, but the core idea — *don't ask if it looks right, measure how much it deviates* — applies anywhere dumb geometry needs to become smart geometry:
+
+- **Animation & game dev** — clean up scanned assets, retopologize with measurable fidelity
+- **Video production** — the GruntAndMuse show itself will use this pipeline
+- **Reverse engineering** — document and reproduce physical parts
+
+## What we won't do
+
+- We won't add cloud features. Your files stay on your machine. Ever.
+- We won't add telemetry. We don't want your data.
+- We won't paywall features. MIT means MIT.
+- We won't rush. Slow is smooth, smooth is fast.
+
+---
+
+*Last updated: 2026-10-02*
