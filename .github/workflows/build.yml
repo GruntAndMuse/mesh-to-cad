@@ -83,6 +83,17 @@ jobs:
         with:
           path: ./artifacts
 
+      - name: Rename for unique release assets
+        # WHY: ubuntu and macos both build a file called "mesh-to-cad".
+        # Release assets must have unique names or one silently overwrites
+        # the other (caught 2026-10-02 on v1.0.0 — macOS binary lost).
+        shell: bash
+        run: |
+          mv ./artifacts/mesh-to-cad-linux/mesh-to-cad ./artifacts/mesh-to-cad-linux/mesh-to-cad-linux
+          mv ./artifacts/mesh-to-cad-macos/mesh-to-cad ./artifacts/mesh-to-cad-macos/mesh-to-cad-macos
+          mv ./artifacts/mesh-to-cad-windows/mesh-to-cad.exe ./artifacts/mesh-to-cad-windows/mesh-to-cad-windows.exe
+          ls ./artifacts/*/*
+
       - name: Create release
         uses: softprops/action-gh-release@v2
         with:
