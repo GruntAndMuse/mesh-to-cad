@@ -21,11 +21,20 @@ window and the user would see nothing. Keep the console.
 
 block_cipher = None
 
+# WHY: sigstore's trusted-root assets live in sigstore._store, which is only
+# referenced as a string (importlib.resources.files("sigstore._store")) —
+# PyInstaller's scanner misses it. Without these, `update`'s automatic
+# signature verification dies with ModuleNotFoundError in the frozen binary.
+# (Found 2026-10-04 via frozen-binary test; verified working after.)
+from PyInstaller.utils.hooks import collect_data_files
+_sigstore_datas = collect_data_files('sigstore')
+
 a = Analysis(
     ['mesh-to-cad'],
     pathex=['.', 'scripts'],
     binaries=[],
     datas=[
+        *_sigstore_datas,
         # Bundle scripts/ as data files — the CLI resolves SCRIPTS_DIR via
         # sys._MEIPASS at runtime and imports from there. WHY both pathex
         # AND datas: pathex lets PyInstaller find the modules for bundling,
@@ -50,6 +59,11 @@ a = Analysis(
         'scipy.spatial',
         'scipy.spatial.cKDTree',
         'networkx',
+        # sigstore._store holds the trusted-root assets; referenced only via
+        # importlib.resources string, invisible to PyInstaller's scanner.
+        # WHY here: `mesh-to-cad update` verifies release signatures
+        # automatically (v1.0.3+). Without this the frozen binary can't.
+        'sigstore._store',
     ],
     hookspath=[],
     hooksconfig={},

@@ -122,6 +122,13 @@ Verify the signature first (authenticity), then the checksum (integrity):
 a valid signature on `checksums.txt` plus a matching SHA-256 means the
 binary is both genuine and intact.
 
+**Automatic since v1.0.3:** `mesh-to-cad update` verifies the signature
+itself when it downloads a new binary — signature first, checksum second.
+A bad signature deletes the download and refuses it, exactly like a bad
+checksum. If the verifier can't run (technical reason, not a failure), it
+says so explicitly and falls back to checksum-only — never silently. The
+manual command above remains for sneakernet/offline verification.
+
 ## How to verify this yourself
 
 Don't take our word for it — that's the whole point of FOSS.

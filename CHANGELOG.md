@@ -5,6 +5,21 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.3] — 2026-10-04
+
+### Added
+- **Automatic Sigstore signature verification in `update`** — Dennis's
+  standing principle: the tool does the verifying, not the user. When
+  `mesh-to-cad update` downloads a new binary, it now also fetches the
+  release's `.sigstore` bundle and verifies the signature automatically:
+  signature first (proves who built it), checksum second (proves the bytes
+  survived the trip). A bad signature → the file is deleted and refused,
+  same as a bad checksum. If the verifier can't run for a technical reason
+  (not bundled, trusted-root unreachable), it falls back to checksum-only
+  and says so explicitly — never silently. Cost: ~12MB on the ~100MB
+  frozen binary (measured, not guessed); hand-rolling verification to save
+  ~5MB was rejected — security code doesn't get rewritten to save bytes.
+
 ## [1.0.2] — 2026-10-04
 
 ### Added

@@ -123,7 +123,7 @@ ACCEPTED_EXTENSIONS = {".stl", ".ply", ".obj", ".3mf"}
 # 3MF is the modern replacement. Anything else (STEP, FCStd, etc.) is either
 # already CAD (you don't need this pipeline) or an image (wrong tool).
 
-VERSION = "1.0.2"
+VERSION = "1.0.3"
 
 # Build date (UTC, YYYY-MM-DD), stamped at build time by CI — see
 # .github/workflows/build.yml ("Stamp build date" step), which generates
@@ -577,6 +577,92 @@ def _parse_checksum(checksums_text: str, filename: str) -> str | None:
         parts = line.strip().split()
         if len(parts) >= 2 and parts[-1] == filename:
             return parts[0]
+
+
+# ---------------------------------------------------------------------------
+# Sigstore signature verification (automatic — the tool verifies, not you)
+# ---------------------------------------------------------------------------
+# Releases from v1.0.2 onward ship a <asset>.sigstore bundle, signed at
+# build time by CI via GitHub OIDC. The signature attests: THESE EXACT BYTES
+# were built by this repo's workflow on this tag. Checksums prove the file
+# wasn't corrupted; the signature proves WHO built it. Verify signature
+# first, checksum second.
+#
+# WHY sigstore-python (not a hand-rolled verifier): verification means X.509
+# chain building, Fulcio cert checks, ECDSA, and Rekor inclusion proofs.
+# Each is a place to get security subtly wrong. The reference implementation
+# is maintained by OpenSSF; hand-rolling it to save ~5MB would trade real
+# security for bytes. The frozen binary is already ~100MB — the ~12MB
+# sigstore costs is ~10%. Measured 2026-10-04, not guessed.
+_SIGSTORE_IDENTITY_TMPL = (
+    "https://github.com/GruntAndMuse/mesh-to-cad"
+    "/.github/workflows/build.yml@refs/tags/v{ver}"
+)
+_SIGSTORE_ISSUER = "https://token.actions.githubusercontent.com"
+
+
+class _SigstoreFailure(Exception):
+    """Verification RAN and the signature is bad. The file must be refused."""
+
+
+def _verify_sigstore_bundle(bundle_path: Path, artifact_path: Path,
+                            release_ver: str) -> str:
+    """Verify artifact_path against its .sigstore bundle.
+
+    Returns "ok" when the signature verifies.
+    Returns "unavailable: <reason>" when the verifier itself can't run
+    (sigstore not bundled, TUF refresh failed) — NOT a verification
+    failure; the caller falls back to checksum-only and says so loudly.
+    Raises _SigstoreFailure (with a plain-English reason) when verification
+    RAN and the signature is bad — the file must be refused.
+
+    WHY the split: "can't check" and "checked and it's bad" are different
+    universes. Conflating them either blocks legitimate updates or —
+    worse — waves through tampered ones.
+    """
+    try:
+        from sigstore.models import Bundle
+        from sigstore.verify import Verifier
+        from sigstore.verify.policy import Identity
+    except ImportError as e:
+        return f"unavailable: signature library not bundled ({e})"
+
+    # Quiet sigstore's logger — its TUF chatter isn't the user's problem.
+    import logging
+    logging.getLogger("sigstore").setLevel(logging.WARNING)
+
+    expected_identity = _SIGSTORE_IDENTITY_TMPL.format(ver=release_ver)
+    policy = Identity(identity=expected_identity, issuer=_SIGSTORE_ISSUER)
+
+    try:
+        bundle = Bundle.from_json(bundle_path.read_bytes())
+    except Exception as e:
+        raise _SigstoreFailure(
+            f"signature bundle is corrupt or unreadable ({e})")
+
+    # Fresh trusted root when the network allows; embedded root otherwise.
+    # WHY try online first: Sigstore's root CAN rotate (rare, announced).
+    # A stale embedded root would falsely reject a legitimate new release.
+    verifier = None
+    verifier_error = ""
+    for offline in (False, True):
+        try:
+            verifier = Verifier.production(offline=offline)
+            break
+        except Exception as e:  # TUFError and friends — verifier unavailable
+            verifier_error = str(e)
+    if verifier is None:
+        return f"unavailable: couldn't initialize verifier ({verifier_error})"
+
+    try:
+        verifier.verify_artifact(artifact_path.read_bytes(), bundle, policy)
+    except Exception as e:
+        # VerificationError, InvalidBundle, anything else from the check
+        # itself: the signature does NOT attest this file. Refuse it.
+        # WHY catch broad: any unexpected failure mode must fail CLOSED.
+        # An unknown error is not an approval.
+        raise _SigstoreFailure(str(e))
+    return "ok"
     return None
 
 
@@ -597,22 +683,27 @@ def _download_file(url: str, dest: Path) -> None:
 
 
 def _download_and_verify(asset_url: str, asset_name: str,
-                         latest: dict) -> None:
-    """Download the new binary and verify its SHA-256 against the release's
-    checksums.txt. Match -> safe to replace. Mismatch -> the download is
-    DELETED and we refuse, loudly. Never silently accepts a bad hash.
+                         latest: dict, latest_ver: str) -> None:
+    """Download the new binary and verify it: Sigstore signature FIRST,
+    SHA-256 checksum second. Either failing -> the download is DELETED and
+    we refuse, loudly. Never silently accepts a bad file.
 
     WHY this exists: Dennis's rule — the transport (HTTPS download vs USB
     sneakernet) was never the security. VERIFICATION is. A corrupted or
-    tampered binary must not run, however it arrived.
+    tampered binary must not run, however it arrived. And per his standing
+    principle, the TOOL does the verifying, not the user.
     """
     # checksums.txt rides with the release assets (CI generates it;
-    # releases from v1.0.2 onward include it).
+    # releases from v1.0.2 onward include it). So does the .sigstore
+    # bundle for this asset (same releases).
     checksums_url = None
+    bundle_url = None
+    bundle_name = asset_name + ".sigstore"
     for a in latest.get("assets") or []:
         if a.get("name") == "checksums.txt":
             checksums_url = a.get("browser_download_url")
-            break
+        elif a.get("name") == bundle_name:
+            bundle_url = a.get("browser_download_url")
     if not checksums_url:
         print()
         print("  This release has no checksums.txt, so the download can't")
@@ -633,6 +724,43 @@ def _download_and_verify(asset_url: str, asset_name: str,
         _download_file(asset_url, dest)
     except RuntimeError as e:
         die(f"{e}", "Check your connection and try again.")
+
+    # Signature FIRST (proves who built it), checksum second (proves the
+    # bytes survived the trip). Belt and suspenders, in that order.
+    sig_verified = False
+    if bundle_url:
+        bundle_dest = Path.cwd() / bundle_name
+        print("  Fetching signature bundle…")
+        try:
+            _download_file(bundle_url, bundle_dest)
+        except RuntimeError as e:
+            dest.unlink(missing_ok=True)
+            die(f"couldn't fetch the signature bundle ({e}) — deleted the download.",
+                "Without the signature there's nothing to verify the "
+                "binary's origin against, so it doesn't stay.")
+        print("  Verifying Sigstore signature…")
+        try:
+            sig_result = _verify_sigstore_bundle(bundle_dest, dest, latest_ver)
+        except _SigstoreFailure as e:
+            dest.unlink(missing_ok=True)
+            bundle_dest.unlink(missing_ok=True)
+            die(f"downloaded file FAILED signature verification ({e}) — "
+                "deleted it.",
+                "Do not run it. The binary is not what the release claims. "
+                "Try the download again; if it keeps failing, use the "
+                "sneakernet steps instead.")
+        if sig_result == "ok":
+            sig_verified = True
+            print("  ✓ Signature verified: built by GruntAndMuse's release pipeline.")
+        else:  # "unavailable: ..." — verifier couldn't run. Say so LOUDLY.
+            reason = sig_result.split(": ", 1)[1] if ": " in sig_result else sig_result
+            print(f"  ⚠ Signature NOT verified ({reason}).")
+            print("    Falling back to checksum-only — the binary's origin")
+            print("    is unconfirmed. Proceed only if you trust the source.")
+        bundle_dest.unlink(missing_ok=True)
+    else:
+        print("  (No signature bundle in this release — releases from v1.0.2")
+        print("   onward include one. Checksum-only verification follows.)")
 
     print("  Fetching checksums.txt…")
     try:
@@ -657,7 +785,11 @@ def _download_and_verify(asset_url: str, asset_name: str,
             "Do not run it. Try the download again; if it keeps failing, "
             "use the sneakernet steps instead.")
     print()
-    print("  ✓ Verified: checksum matches. Safe to replace your binary.")
+    if sig_verified:
+        print("  ✓ Verified: signature + checksum match. Safe to replace your binary.")
+    else:
+        print("  ✓ Verified: checksum matches. (Signature was not verified —")
+        print("    see above. Safe to replace only if you trust the source.)")
     print(f"  Saved as: {dest}")
     if sys.platform == "win32":
         print("  (Close this window first — Windows can't replace a running .exe.)")
@@ -679,8 +811,10 @@ def _print_sneakernet_instructions() -> None:
     print("  1. On an internet-connected machine, download the latest")
     print("     release from:")
     print("     https://github.com/GruntAndMuse/mesh-to-cad/releases/latest")
-    print("  2. Download checksums.txt from the same release page.")
-    print("  3. Copy the file for your system to this machine via USB:")
+    print("  2. Download checksums.txt AND the .sigstore file for your")
+    print("     system from the same release page (e.g. mesh-to-cad-linux")
+    print("     plus mesh-to-cad-linux.sigstore).")
+    print("  3. Copy the files for your system to this machine via USB:")
     print("       Windows: mesh-to-cad-windows.exe")
     print("       Linux:   mesh-to-cad-linux")
     print("       macOS:   mesh-to-cad-macos")
@@ -690,6 +824,11 @@ def _print_sneakernet_instructions() -> None:
     print("       Windows (PowerShell): Get-FileHash <filename> -Algorithm SHA256")
     print("     The hash must match exactly. If it doesn't, delete the file")
     print("     and copy it again — do not run it.")
+    print("     (If you have the sigstore CLI installed, you can also verify")
+    print("     the signature: sigstore verify identity --bundle <file>.sigstore")
+    print("     --cert-identity \"https://github.com/GruntAndMuse/mesh-to-cad/")
+    print("     .github/workflows/build.yml@refs/tags/vX.Y.Z\" --cert-oidc-issuer")
+    print("     \"https://token.actions.githubusercontent.com\" <file>)")
     print("  5. Replace your current binary and run 'mesh-to-cad --version'")
     print("     to confirm the new version.")
 
@@ -779,7 +918,8 @@ def cmd_update() -> None:
         else:
             print("  Don't recognize this operating system — download")
         print(f"  manually from {latest.get('html_url', '')}")
-        print("  and verify it against checksums.txt before running it.")
+        print("  and verify it against checksums.txt (and the .sigstore")
+        print("  bundle, if you have the sigstore CLI) before running it.")
         return
     print()
     try:
@@ -787,11 +927,11 @@ def cmd_update() -> None:
     except EOFError:
         answer = ""  # piped stdin: treat as "no"
     if answer.strip().lower() in ("y", "yes"):
-        _download_and_verify(asset_url, asset_name, latest)
+        _download_and_verify(asset_url, asset_name, latest, latest_ver)
     else:
         print(f"  No download. It's at {asset_url}")
-        print("  (verify it against checksums.txt on the release page "
-              "before running it.)")
+        print("  (verify it against checksums.txt — and the .sigstore bundle")
+        print("  if you have the sigstore CLI — before running it.)")
 
 
 # ---------------------------------------------------------------------------

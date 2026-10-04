@@ -114,3 +114,33 @@ sigstore verify identity \
   behavior — verify, don't assume, if you upgrade). We rename to
   `<asset>.sigstore` for the published extension.
 - Pin the action version (`@v3.4.0`, not `@v3`) for reproducible builds.
+
+## Automatic verification (consumer side) — added v1.0.3
+
+Signing is half the story. The other half: the tool verifies by itself
+(Dennis's principle: "the tool does the verifying, not the user").
+
+**`mesh-to-cad update` flow:** download binary → download `<asset>.sigstore`
+→ `sigstore.verify.Verifier.production()` (online first for a fresh trusted
+root, `offline=True` fallback to the embedded root) →
+`Identity(identity=<per-tag identity>, issuer="https://token.actions.githubusercontent.com")`
+→ `verify_artifact()`. Signature first, checksum second. Verification
+failure → delete the file, refuse loudly. Verifier *unavailable* (not
+failed) → checksum-only with an explicit warning, never silent.
+
+**PyInstaller gotchas (earned 2026-10-04):**
+- `sigstore._store` is referenced only as a string
+  (`importlib.resources.files("sigstore._store")`) — invisible to the
+  scanner. Add it to `hiddenimports` AND bundle its data files
+  (`collect_data_files('sigstore')`); without both, the frozen binary dies
+  with `ModuleNotFoundError: No module named 'sigstore._store'`.
+- In sigstore-python 4.x, `verify_artifact` takes a `Bundle` object
+  (`Bundle.from_json(path.read_bytes())`), not a path string.
+- `Verifier.production()` does a TUF refresh (needs network);
+  `Verifier.production(offline=True)` uses the embedded root and works
+  fully offline. Try online first, fall back to offline.
+- Quiet sigstore's logger (`logging.getLogger("sigstore").setLevel(WARNING)`)
+  or its TUF chatter pollutes your CLI output.
+- Cost: ~12MB on the frozen binary (measured via PyInstaller test build).
+  Hand-rolling verification to save ~5MB was rejected — security code
+  doesn't get rewritten to save bytes.

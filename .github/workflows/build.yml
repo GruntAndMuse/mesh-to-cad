@@ -45,6 +45,10 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r scripts/requirements.txt
           pip install pyinstaller
+          # WHY: `mesh-to-cad update` verifies release Sigstore signatures
+          # automatically (v1.0.3+). Pinned — verification behavior must not
+          # drift between releases.
+          pip install "sigstore==4.5.0"
 
       - name: Stamp build date
         # WHY: the offline build-age nudge needs to know when THIS binary
