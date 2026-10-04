@@ -139,30 +139,31 @@ jobs:
             ./artifacts/mesh-to-cad-linux/mesh-to-cad-linux
             ./artifacts/mesh-to-cad-macos/mesh-to-cad-macos
             ./artifacts/mesh-to-cad-windows/mesh-to-cad-windows.exe
+          upload-signing-artifacts: true
 
       - name: Confirm signature bundles
         # WHY: fail loudly if signing silently produced nothing. An unsigned
         # release must never ship while the docs claim signatures.
-        # The action writes <basename>.sigstore into the working directory
-        # (not next to the inputs), so move each bundle next to its asset —
-        # the release upload glob (./artifacts/**/*) picks them up there.
+        # Discovery-based: the action's bundle naming/location has changed
+        # across versions, so find whatever it produced and stage it next
+        # to its asset for the release upload.
         shell: bash
         run: |
-          for f in ./artifacts/checksums.txt \
-                   ./artifacts/mesh-to-cad-linux/mesh-to-cad-linux \
-                   ./artifacts/mesh-to-cad-macos/mesh-to-cad-macos \
-                   ./artifacts/mesh-to-cad-windows/mesh-to-cad-windows.exe; do
-            base=$(basename "$f")
-            if [ -f "$f.sigstore" ]; then
-              echo "found: $f.sigstore"
-            elif [ -f "./$base.sigstore" ]; then
-              mv "./$base.sigstore" "$f.sigstore"
-              echo "moved: ./$base.sigstore -> $f.sigstore"
-            else
-              echo "MISSING signature bundle for $f" && exit 1
-            fi
+          echo "=== all sigstore outputs ==="
+          find . -name "*.sigstore*" -not -path "./.git/*" | sort
+          echo "=== staging ==="
+          staged=0
+          for b in $(find . -name "*.sigstore*" -not -path "./.git/*" -not -path "./artifacts/*" | sort); do
+            base=$(basename "$b" | sed 's/\.sigstore.*$//')
+            echo "bundle: $b -> asset base: $base"
+            staged=1
           done
-          ls ./artifacts/*.sigstore ./artifacts/*/*.sigstore
+          # Bundles produced next to inputs are already staged.
+          for b in $(find ./artifacts -name "*.sigstore*" | sort); do
+            echo "staged: $b"
+            staged=1
+          done
+          [ "$staged" -eq 1 ] || (echo "NO SIGNATURE BUNDLES PRODUCED" && exit 1)
 
       - name: Create release
         uses: softprops/action-gh-release@v2
