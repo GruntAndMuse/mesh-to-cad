@@ -36,7 +36,7 @@ mesh-to-cad started as a 3D printing tool, but the core idea — *don't ask if i
 Not everyone can use a command-line tool. We build for the people with the fewest options first:
 
 - **Now:** Standalone executables (no Python needed) + QUICKSTART with screenshots
-- **Next:** Simple GUI — file picker, Run button, progress bar, plain-English results. Tkinter (zero new dependencies, works everywhere).
+- **Next:** Simple GUI — **drag-and-drop** STL files onto the window, Run button, progress bar, plain-English results. (Dennis, 2026-10-03: "definitely gui and drag and drop if possible.") Tkinter (zero new dependencies, works everywhere) unless drag-and-drop needs more — then evaluate Dear PyGui (MIT, FOSS, offline).
 - **Later:** Package managers (Chocolatey, Homebrew) — `choco install mesh-to-cad`
 - **Eventually:** Ports to other platforms/languages where the need exists. Low priority by user count, high priority by principle — the people with the fewest options appreciate it most.
 - **Spoken languages:** All-inclusive means all languages. UI strings via gettext, community-contributable translations. Spanish first (large maker community), then wherever contributors take it.

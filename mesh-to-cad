@@ -17,7 +17,10 @@ USAGE:
     mesh-to-cad check myfile.stl            # just the quality gate
     mesh-to-cad analyze myfile.stl          # just the analysis
     mesh-to-cad deviation model.stl ref.stl # deviation check (needs CloudCompare)
+    mesh-to-cad update                      # check for a newer release (manual only)
+    mesh-to-cad changelog                   # show changelog (works offline)
     mesh-to-cad --help                      # this text
+    mesh-to-cad --version                   # print version, e.g. 1.0.1
 
 WHY ONE COMMAND:
     Dennis's rule: "as close to 1 thing that does everything as possible,
@@ -47,7 +50,9 @@ PROJECT LAYOUT (created by the full run):
 Requires: trimesh, numpy, scipy, networkx (see scripts/requirements.txt).
 CloudCompare only needed for the `deviation` subcommand.
 """
+import difflib
 import json
+import os
 import shutil
 import sys
 import traceback
@@ -118,7 +123,7 @@ ACCEPTED_EXTENSIONS = {".stl", ".ply", ".obj", ".3mf"}
 # 3MF is the modern replacement. Anything else (STEP, FCStd, etc.) is either
 # already CAD (you don't need this pipeline) or an image (wrong tool).
 
-VERSION = "0.1.0"  # Phase 1
+VERSION = "1.0.1"
 
 
 # ---------------------------------------------------------------------------
@@ -131,7 +136,13 @@ def die(message: str, hint: str = "", code: int = 1) -> None:
     code you didn't write." A friendly error tells them what happened and
     what to do. Every error path in this CLI goes through here so the
     experience is consistent: problem, then fix.
+
+    The stdout flush is deliberate: stdout is block-buffered when piped,
+    stderr is not. Without the flush, the error (stderr) can print BEFORE
+    earlier stdout lines (like "Step 1/3"), making it look like the
+    pipeline kept going after failing. Flush first, error second.
     """
+    sys.stdout.flush()
     print(f"\nerror: {message}", file=sys.stderr)
     if hint:
         print(f"\n  {hint}", file=sys.stderr)
@@ -249,9 +260,14 @@ def cmd_check(mesh_path: Path, as_json: bool = False) -> dict:
 # Subcommand: analyze
 # ---------------------------------------------------------------------------
 def cmd_analyze(mesh_path: Path, out_dir: Path | None = None,
-                as_json: bool = False) -> dict:
-    """Run analysis. Writes measurements JSON + aligned STL next to the input
-    (or into out_dir if given). Returns the result dict."""
+                as_json: bool = False, force: bool = False) -> dict:
+    """Run analysis. Writes measurements JSON + aligned STL into out_dir
+    (default: next to the input). Returns the result dict.
+
+    Refuses to overwrite existing outputs unless force=True. WHY: silently
+    replacing someone's files is how data gets lost. The full pipeline
+    passes force=True (re-runs are expected); standalone analyze does not.
+    """
     try:
         result, aligned = analyze_mod.analyze(mesh_path)
     except Exception as e:
@@ -266,6 +282,16 @@ def cmd_analyze(mesh_path: Path, out_dir: Path | None = None,
 
     json_path = target_dir / f"{mesh_path.stem}_measurements.json"
     aligned_path = target_dir / f"{mesh_path.stem}_aligned.stl"
+    if not force:
+        existing = [p for p in (json_path, aligned_path) if p.exists()]
+        if existing:
+            die(
+                f"won't overwrite existing output: {existing[0].name}"
+                + (f" (and {len(existing)-1} more)" if len(existing) > 1 else ""),
+                f"Delete the file(s) first, or use --output to write into "
+                f"a different folder: mesh-to-cad analyze {mesh_path.name} "
+                f"--output ./newfolder",
+            )
     aligned.export(str(aligned_path))
     result["aligned_mesh"] = str(aligned_path)
     json_path.write_text(json.dumps(result, indent=2), encoding="utf-8")
@@ -356,6 +382,150 @@ def cmd_deviation(model_path: Path, ref_path: Path,
 
 
 # ---------------------------------------------------------------------------
+# Subcommand: changelog (offline)
+# ---------------------------------------------------------------------------
+def find_bundled_file(name: str) -> Path | None:
+    """Locate a file bundled with the CLI (CHANGELOG.md, etc.).
+
+    Works both from source (file sits next to this script) and frozen
+    (PyInstaller extracts datas into sys._MEIPASS, which CLI_DIR already
+    points at). Returns None if not found.
+    """
+    candidate = CLI_DIR / name
+    return candidate if candidate.is_file() else None
+
+
+def cmd_changelog() -> None:
+    """Print the bundled CHANGELOG.md. Fully offline — no network."""
+    path = find_bundled_file("CHANGELOG.md")
+    if path is None:
+        die(
+            "changelog not found.",
+            "CHANGELOG.md should ship next to mesh-to-cad (or bundled in "
+            "the exe). If you built from source, make sure it's in the "
+            "mesh-to-cad folder.",
+        )
+    print(path.read_text(encoding="utf-8").rstrip())
+    print()
+
+
+# ---------------------------------------------------------------------------
+# Subcommand: update (manual check only — never automatic)
+# ---------------------------------------------------------------------------
+UPDATE_API_URL = "https://api.github.com/repos/GruntAndMuse/mesh-to-cad/releases/latest"
+UPDATE_API_LIST_URL = "https://api.github.com/repos/GruntAndMuse/mesh-to-cad/releases?per_page=5"
+# Test hook: MESH_TO_CAD_UPDATE_URL env var overrides the API URL, so the
+# offline/error path can be exercised without blocking the network.
+# Not documented in --help; for testing only.
+def _update_url() -> str:
+    return os.environ.get("MESH_TO_CAD_UPDATE_URL") or UPDATE_API_URL
+
+
+def _update_list_url() -> str:
+    return os.environ.get("MESH_TO_CAD_UPDATE_URL") or UPDATE_API_LIST_URL
+
+
+def _ver_tuple(v: str) -> tuple:
+    """'1.0.1' -> (1, 0, 1). Non-numeric parts sort after numbers."""
+    parts = []
+    for p in v.lstrip("v").split("."):
+        parts.append(int(p) if p.isdigit() else p)
+    return tuple(parts)
+
+
+def _fetch_json(url: str, timeout: int = 15) -> dict | list:
+    """GET JSON. Raises RuntimeError with a friendly message on any failure
+    (no network, DNS, timeout, bad response) — never a traceback."""
+    import urllib.request
+    import urllib.error
+    req = urllib.request.Request(url, headers={
+        "Accept": "application/vnd.github+json",
+        "User-Agent": f"mesh-to-cad/{VERSION}",
+    })
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as e:
+        raise RuntimeError(f"GitHub API returned HTTP {e.code}") from e
+    except urllib.error.URLError as e:
+        raise RuntimeError(
+            "couldn't reach github.com — check your internet connection."
+        ) from e
+    except TimeoutError as e:
+        raise RuntimeError(
+            "GitHub didn't answer in time — try again later."
+        ) from e
+    except (ValueError, KeyError) as e:
+        raise RuntimeError(
+            f"GitHub gave an unexpected response ({e}) — try again later."
+        ) from e
+
+
+def cmd_update() -> None:
+    """Check for a newer release. MANUAL ONLY — this runs solely when the
+    user types 'mesh-to-cad update'. Nothing phones home otherwise."""
+    url = _update_url()
+    try:
+        latest = _fetch_json(url)
+    except RuntimeError as e:
+        die(f"update check failed: {e}",
+            "This needs internet. Your installed copy works fine offline — "
+            "this check is only for finding out about new versions.")
+    if not isinstance(latest, dict) or "tag_name" not in latest:
+        die("update check failed: unexpected response from GitHub.",
+            "Try again later, or check "
+            "https://github.com/GruntAndMuse/mesh-to-cad/releases manually.")
+
+    latest_ver = latest["tag_name"].lstrip("v")
+    print(f"  installed: mesh-to-cad {VERSION}")
+    print(f"  latest:    {latest['tag_name']}")
+
+    cmp = (_ver_tuple(VERSION) > _ver_tuple(latest_ver)) - \
+          (_ver_tuple(VERSION) < _ver_tuple(latest_ver))
+    if cmp >= 0:
+        if cmp > 0:
+            print()
+            print("  You are running a newer version than the latest release.")
+            print("  (This is a development build — nothing to do.)")
+        else:
+            print()
+            print("  You're up to date. ✓")
+        return
+
+    # An update IS available.
+    print()
+    print(f"  Update available: {VERSION} -> {latest_ver}")
+    print()
+    body = (latest.get("body") or "").strip()
+    if body:
+        print("  What's new:")
+        for line in body.splitlines()[:40]:
+            print(f"    {line}")
+        print()
+    print(f"  Download: {latest.get('html_url', '')}")
+    assets = latest.get("assets") or []
+    if assets:
+        print("  Files:")
+        for a in assets:
+            print(f"    {a.get('name')} — {a.get('browser_download_url')}")
+
+    # Revert path: previous release's URL, so "go back" is one download.
+    # WHY HERE: no auto-updater means no auto-rollback either. The cheapest
+    # revert for a CLI is telling the user exactly where the old version is.
+    try:
+        releases = _fetch_json(_update_list_url())
+        if isinstance(releases, list) and len(releases) > 1:
+            prev = releases[1]
+            ptag = prev.get("tag_name", "")
+            purl = prev.get("html_url", "")
+            if ptag and purl:
+                print()
+                print(f"  To revert, download {ptag} from {purl}")
+    except RuntimeError:
+        pass  # revert hint is a nicety; the update info above is the point.
+
+
+# ---------------------------------------------------------------------------
 # Full pipeline: intake -> quality gate -> analysis
 # ---------------------------------------------------------------------------
 def cmd_full(mesh_path: Path, project_dir: Path | None = None,
@@ -375,6 +545,10 @@ def cmd_full(mesh_path: Path, project_dir: Path | None = None,
     # after the file, next to the file. Override with --output.
     if project_dir is None:
         project_dir = mesh_path.parent / mesh_path.stem
+    # Track this BEFORE mkdir: if the pipeline dies before completing, we
+    # remove the half-built folder — but only if we created it. Never nuke
+    # a pre-existing folder on a re-run.
+    we_created_project = not project_dir.exists()
     input_dir = project_dir / "input"
     analysis_dir = project_dir / "analysis"
     input_dir.mkdir(parents=True, exist_ok=True)
@@ -402,106 +576,122 @@ def cmd_full(mesh_path: Path, project_dir: Path | None = None,
         },
     }
 
-    # --- Step 1: Units ---
-    step_header(1, 3, "Checking units")
-    units = cmd_units(working_file, as_json=False)
-    manifest["source"]["units_check"] = {
-        "suggestion": units["suggestion"],
-        "scale_factor": units["scale_factor"],
-        "confidence": units["confidence"],
-    }
-    if units["suggestion"] == "millimeters":
-        step_ok("units look like millimeters — proceeding")
-    else:
-        # WHY STOP AND ASK: a wrong scale factor silently corrupts every
-        # downstream number. The script suggests; the human confirms. This
-        # is the one place in Phase 1 where the pipeline refuses to guess.
-        print()
-        print("  ⚠ Units need your confirmation before continuing.")
-        print(f"  Suggestion: {units['suggestion']} (×{units['scale_factor']})")
-        print(f"  {units['why']}")
-        print()
-        answer = input("  Is this correct? [y/N] ").strip().lower()
-        if answer not in ("y", "yes"):
-            print("\n  Stopped. No files were modified.")
-            print("  If you know the correct units, convert the file first")
-            print("  (MeshLab: Filters > Normals, Curvatures > Transform: Scale),")
-            print("  then run mesh-to-cad again.")
-            sys.exit(1)
-        step_ok("units confirmed by user")
-        manifest["source"]["units"] = f"mm (confirmed, scale ×{units['scale_factor']})"
+    # --- Pipeline steps ---
+    # WHY THE TRY: die() exits via SystemExit from deep inside a
+    # step (e.g. unreadable mesh in Step 1). By then we've already
+    # created project/input/ and copied the file. Without cleanup
+    # the user is left with a half-built folder and no manifest.
+    # Exit 2 (needs-rescan) is the exception: it intentionally
+    # saves the manifest, so that folder stays.
+    try:
+        # --- Step 1: Units ---
+        step_header(1, 3, "Checking units")
+        units = cmd_units(working_file, as_json=False)
+        manifest["source"]["units_check"] = {
+            "suggestion": units["suggestion"],
+            "scale_factor": units["scale_factor"],
+            "confidence": units["confidence"],
+        }
+        if units["suggestion"] == "millimeters":
+            step_ok("units look like millimeters — proceeding")
+        else:
+            # WHY STOP AND ASK: a wrong scale factor silently corrupts every
+            # downstream number. The script suggests; the human confirms. This
+            # is the one place in Phase 1 where the pipeline refuses to guess.
+            print()
+            print("  ⚠ Units need your confirmation before continuing.")
+            print(f"  Suggestion: {units['suggestion']} (×{units['scale_factor']})")
+            print(f"  {units['why']}")
+            print()
+            answer = input("  Is this correct? [y/N] ").strip().lower()
+            if answer not in ("y", "yes"):
+                print("\n  Stopped. No files were modified.")
+                print("  If you know the correct units, convert the file first")
+                print("  (MeshLab: Filters > Normals, Curvatures > Transform: Scale),")
+                print("  then run mesh-to-cad again.")
+                sys.exit(1)
+            step_ok("units confirmed by user")
+            manifest["source"]["units"] = f"mm (confirmed, scale ×{units['scale_factor']})"
 
-    # --- Step 2: Quality gate ---
-    step_header(2, 3, "Quality gate")
-    gate = cmd_check(working_file, as_json=False)
-    manifest["quality"] = gate["verdict"]
-    manifest["quality_reasons"] = gate["reasons"]
-    if gate["verdict"] == "needs-rescan":
-        # Exit 2, not 1: SOP scripts can distinguish "pipeline stopped on
-        # purpose" (2) from "something broke" (1). The message above already
-        # told the user why — this just makes it machine-readable.
-        print("\n  The pipeline stopped here ON PURPOSE.")
-        print("  No pipeline fixes missing data — rescan the part, then")
-        print("  run mesh-to-cad on the new scan.")
+        # --- Step 2: Quality gate ---
+        step_header(2, 3, "Quality gate")
+        gate = cmd_check(working_file, as_json=False)
+        manifest["quality"] = gate["verdict"]
+        manifest["quality_reasons"] = gate["reasons"]
+        if gate["verdict"] == "needs-rescan":
+            # Exit 2, not 1: SOP scripts can distinguish "pipeline stopped on
+            # purpose" (2) from "something broke" (1). The message above already
+            # told the user why — this just makes it machine-readable.
+            print("\n  The pipeline stopped here ON PURPOSE.")
+            print("  No pipeline fixes missing data — rescan the part, then")
+            print("  run mesh-to-cad on the new scan.")
+            manifest_path = project_dir / "manifest.json"
+            manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+            print(f"\n  Manifest saved: {manifest_path}")
+            sys.exit(2)
+        step_ok(f"verdict: {gate['verdict']}")
+
+        # --- Step 3: Analysis ---
+        step_header(3, 3, "Analyzing geometry")
+        analysis = cmd_analyze(working_file, out_dir=analysis_dir, as_json=False,
+            force=True)
+        manifest["track"] = analysis["track_decision"]
+        manifest["track_confidence"] = analysis["track_confidence"]
+        manifest["track_reason"] = analysis["track_reason"]
+        step_ok("measurements recorded")
+
+        # --- Manifest ---
+        manifest["tools"] = {
+            "mesh-to-cad": VERSION,
+            # Record what we can; trimesh version is the load-bearing one.
+            "python": f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}",
+        }
+        try:
+            import trimesh as _tm
+            manifest["tools"]["trimesh"] = _tm.__version__
+        except Exception:
+            pass
         manifest_path = project_dir / "manifest.json"
         manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
-        print(f"\n  Manifest saved: {manifest_path}")
-        sys.exit(2)
-    step_ok(f"verdict: {gate['verdict']}")
 
-    # --- Step 3: Analysis ---
-    step_header(3, 3, "Analyzing geometry")
-    analysis = cmd_analyze(working_file, out_dir=analysis_dir, as_json=False)
-    manifest["track"] = analysis["track_decision"]
-    manifest["track_confidence"] = analysis["track_confidence"]
-    manifest["track_reason"] = analysis["track_reason"]
-    step_ok("measurements recorded")
+        # --- Done: summary + next steps ---
+        print(f"\n{'='*60}")
+        print("  Pipeline complete ✓")
+        print(f"{'='*60}")
+        print(f"\n  Project folder: {project_dir}")
+        print(f"  Track: {analysis['track_decision']} "
+              f"(confidence: {analysis['track_confidence']})")
+        print(f"\n  What was created:")
+        print(f"    input/{mesh_path.name}         — your original (untouched)")
+        print(f"    analysis/*_measurements.json  — every number the CAD must match")
+        print(f"    analysis/*_aligned.stl         — mesh in canonical orientation")
+        print(f"    manifest.json                 — project record")
+        print(f"\n  What to do next:")
+        if analysis["track_decision"] == "prismatic":
+            print("    1. Open the mesh in FreeCAD as a reference (File > Import).")
+            print("    2. Build the part in Part Design, measuring from the mesh.")
+            print("       (Tip: MeshToFeatures workbench can automate clean meshes.)")
+            print("    3. When the model is done, verify against the ORIGINAL:")
+        elif analysis["track_decision"] == "organic":
+            print("    1. Open the mesh in FreeCAD (Curves workbench).")
+            print("    2. Build the surface, then check it with:")
+            print(f"       mesh-to-cad deviation your_model.stl {input_copy}")
+            print("    3. When the model is done, verify against the ORIGINAL:")
+        else:
+            print("    1. This part has both prismatic and organic features.")
+            print("    2. Model the prismatic base first, then the organic details.")
+            print("    3. Check each stage with:")
+            print(f"       mesh-to-cad deviation your_model.stl {input_copy}")
+            print("    4. When the model is done, verify against the ORIGINAL:")
+        print(f"       mesh-to-cad deviation final_model.stl {input_copy} --tolerance 0.3")
+        print(f"\n  Full guide: QUICKSTART.md")
+    except SystemExit as _e:
+        if _e.code != 2 and we_created_project and project_dir.exists():
+            shutil.rmtree(project_dir, ignore_errors=True)
+            print(f"  (removed incomplete project folder: {project_dir})",
+                  file=sys.stderr)
+        raise
 
-    # --- Manifest ---
-    manifest["tools"] = {
-        "mesh-to-cad": VERSION,
-        # Record what we can; trimesh version is the load-bearing one.
-        "python": f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}",
-    }
-    try:
-        import trimesh as _tm
-        manifest["tools"]["trimesh"] = _tm.__version__
-    except Exception:
-        pass
-    manifest_path = project_dir / "manifest.json"
-    manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
-
-    # --- Done: summary + next steps ---
-    print(f"\n{'='*60}")
-    print("  Pipeline complete ✓")
-    print(f"{'='*60}")
-    print(f"\n  Project folder: {project_dir}")
-    print(f"  Track: {analysis['track_decision']} "
-          f"(confidence: {analysis['track_confidence']})")
-    print(f"\n  What was created:")
-    print(f"    input/{mesh_path.name}         — your original (untouched)")
-    print(f"    analysis/*_measurements.json  — every number the CAD must match")
-    print(f"    analysis/*_aligned.stl         — mesh in canonical orientation")
-    print(f"    manifest.json                 — project record")
-    print(f"\n  What to do next:")
-    if analysis["track_decision"] == "prismatic":
-        print("    1. Open the mesh in FreeCAD as a reference (File > Import).")
-        print("    2. Build the part in Part Design, measuring from the mesh.")
-        print("       (Tip: MeshToFeatures workbench can automate clean meshes.)")
-        print("    3. When the model is done, verify against the ORIGINAL:")
-    elif analysis["track_decision"] == "organic":
-        print("    1. Open the mesh in FreeCAD (Curves workbench).")
-        print("    2. Build the surface, then check it with:")
-        print(f"       mesh-to-cad deviation your_model.stl {input_copy}")
-        print("    3. When the model is done, verify against the ORIGINAL:")
-    else:
-        print("    1. This part has both prismatic and organic features.")
-        print("    2. Model the prismatic base first, then the organic details.")
-        print("    3. Check each stage with:")
-        print(f"       mesh-to-cad deviation your_model.stl {input_copy}")
-        print("    4. When the model is done, verify against the ORIGINAL:")
-    print(f"       mesh-to-cad deviation final_model.stl {input_copy} --tolerance 0.3")
-    print(f"\n  Full guide: QUICKSTART.md")
 
 
 # ---------------------------------------------------------------------------
@@ -516,11 +706,17 @@ def print_help() -> None:
     print("  mesh-to-cad check <file>            Quality gate only")
     print("  mesh-to-cad analyze <file>          Geometry analysis only")
     print("  mesh-to-cad deviation model ref     Deviation check (needs CloudCompare)")
+    print("  mesh-to-cad update                  Check for a newer release (manual only —")
+    print("                                      never runs on its own)")
+    print("  mesh-to-cad changelog               Show the changelog (works offline)")
     print()
     print("Options:")
-    print("  --output DIR     Project folder (default: ./<filename>/)")
+    print("  --output DIR     Output folder: full pipeline -> project folder;")
+    print("                   analyze -> where measurements/aligned STL go")
+    print("                   (default: next to the input)")
     print("  --tolerance MM   Pass/fail threshold for deviation (with deviation)")
     print("  --json           Machine-readable output (not for full pipeline)")
+    print("  --version        Print version and exit")
     print("  --help, -h       Show this help")
     print()
     print("Examples:")
@@ -552,11 +748,13 @@ def print_subcommand_help(sub: str) -> None:
             "Example:\n  mesh-to-cad check scan.stl"
         ),
         "analyze": (
-            "mesh-to-cad analyze <file>\n\n"
+            "mesh-to-cad analyze <file> [--output DIR]\n\n"
             "Extract measurements: bounding box, planar faces, symmetry,\n"
             "track decision (prismatic/organic/mixed) with confidence.\n"
             "Writes <name>_measurements.json and <name>_aligned.stl\n"
-            "next to the input.\n\n"
+            "next to the input, or into DIR with --output.\n"
+            "Refuses to overwrite existing outputs (delete them first\n"
+            "or pick a different --output).\n\n"
             "Example:\n  mesh-to-cad analyze work/bracket_clean.stl"
         ),
         "deviation": (
@@ -568,6 +766,26 @@ def print_subcommand_help(sub: str) -> None:
             "Requires: CloudCompare installed (https://www.cloudcompare.org/)\n\n"
             "Example:\n"
             "  mesh-to-cad deviation cad_v1.stl input/original.stl --tolerance 0.2"
+        ),
+        "update": (
+            "mesh-to-cad update\n\n"
+            "Check GitHub for a newer release of mesh-to-cad.\n"
+            "Shows your version, the latest version, what's new, and the\n"
+            "download link — plus the previous release's link if you ever\n"
+            "need to revert.\n\n"
+            "MANUAL ONLY: this never runs on its own, never on startup,\n"
+            "never in the background. No network use unless you ask.\n\n"
+            "Note: this contacts https://api.github.com/repos/GruntAndMuse/mesh-to-cad/releases/latest\n"
+            "Do not run on classified or air-gapped networks.\n\n"
+            "Needs internet. If GitHub is unreachable you get a plain\n"
+            "message (exit 1), not a traceback.\n\n"
+            "Example:\n  mesh-to-cad update"
+        ),
+        "changelog": (
+            "mesh-to-cad changelog\n\n"
+            "Print the changelog bundled with this copy of mesh-to-cad.\n"
+            "Works fully offline.\n\n"
+            "Example:\n  mesh-to-cad changelog"
         ),
     }
     print(helps.get(sub, f"unknown subcommand: {sub}"))
@@ -584,11 +802,18 @@ def main() -> None:
     # never falls through to "file not found: --help".
     if not argv or "--help" in argv or "-h" in argv:
         # 'mesh-to-cad check --help' -> subcommand help; bare --help -> full.
-        subs = [a for a in argv if a in ("units", "check", "analyze", "deviation")]
+        subs = [a for a in argv if a in ("units", "check", "analyze",
+                                        "deviation", "update", "changelog")]
         if subs and ("--help" in argv or "-h" in argv):
             print_subcommand_help(subs[0])
         else:
             print_help()
+        sys.exit(0)
+
+    # --version: print version and exit 0. Checked early so --version
+    # never falls through to "file not found: --version".
+    if "--version" in argv:
+        print(f"mesh-to-cad {VERSION}")
         sys.exit(0)
 
     # Pull out global flags before dispatch.
@@ -615,7 +840,7 @@ def main() -> None:
 
     # Dispatch: first arg is the subcommand, unless it looks like a file.
     first = argv[0]
-    if first in ("units", "check", "analyze", "deviation"):
+    if first in ("units", "check", "analyze", "deviation", "update", "changelog"):
         sub, rest = first, argv[1:]
         if sub == "units":
             if len(rest) != 1:
@@ -632,16 +857,49 @@ def main() -> None:
             if len(rest) != 1:
                 print_subcommand_help("analyze")
                 sys.exit(1)
-            cmd_analyze(check_file(rest[0]), as_json=as_json)
+            cmd_analyze(check_file(rest[0]), out_dir=output_dir,
+                        as_json=as_json)
         elif sub == "deviation":
             if len(rest) != 2:
                 print_subcommand_help("deviation")
                 sys.exit(1)
             cmd_deviation(check_file(rest[0]), check_file(rest[1]),
                           tolerance=tolerance, as_json=as_json)
+        elif sub == "update":
+            if rest:
+                print_subcommand_help("update")
+                sys.exit(1)
+            cmd_update()
+        elif sub == "changelog":
+            if rest:
+                print_subcommand_help("changelog")
+                sys.exit(1)
+            cmd_changelog()
     else:
-        # Default: full pipeline. The first arg must be a file; anything
-        # else is a usage error with guidance, not a traceback.
+        # Default: full pipeline. But first — is this a typo'd subcommand
+        # or flag? "chek" isn't a file; telling the user their "file" is
+        # missing actively misdirects. Distinguish:
+        #   - starts with "-"            -> unknown option
+        #   - exists, or has mesh suffix -> a file (check_file validates)
+        #   - otherwise                  -> probably a subcommand typo
+        if first.startswith("-"):
+            die(
+                f"unknown option: {first}",
+                "Run 'mesh-to-cad --help' to see the options.",
+            )
+        if not Path(first).exists() \
+                and Path(first).suffix.lower() not in ACCEPTED_EXTENSIONS:
+            subs = ("units", "check", "analyze", "deviation", "update", "changelog")
+            close = difflib.get_close_matches(first, subs, n=1, cutoff=0.6)
+            hint = (f"Did you mean '{close[0]}'?"
+                    if close else
+                    f"Subcommands are: {', '.join(subs)}.")
+            die(
+                f"unknown subcommand: {first}",
+                f"{hint}\nRun 'mesh-to-cad --help' for usage.",
+            )
+        # The first arg must be a file; anything else is a usage error
+        # with guidance, not a traceback.
         if len(argv) != 1:
             die(
                 f"don't know what to do with: {' '.join(argv)}",

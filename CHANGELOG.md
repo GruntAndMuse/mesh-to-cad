@@ -5,6 +5,31 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.1] — 2026-10-03
+
+### Added
+- **`mesh-to-cad update`** — manual update checker. Compares the built-in
+  version against the latest GitHub release and reports what's new, the
+  download link, and the previous release's link for reverting. Runs ONLY
+  when you type it — never on startup, never in the background. (Privacy:
+  this is the single network call in the entire tool; see SECURITY.md.)
+- **`mesh-to-cad changelog`** — prints the bundled changelog. Fully offline.
+
+### Fixed
+- **Version string** — the CLI now reports 1.0.1 (was 0.1.0 in v1.0.0's
+  manifest.json), and `mesh-to-cad --version` prints it (exit 0).
+- **Unknown subcommand** — `mesh-to-cad chek` now says "unknown subcommand"
+  and suggests the closest match ("Did you mean 'check'?") instead of
+  claiming the file wasn't found.
+- **`analyze --output`** — standalone `analyze` now honors `--output DIR`
+  (was silently ignored, wrote next to the input). Also refuses to
+  overwrite existing outputs with a clear message instead of silently
+  replacing them.
+- **Failure output ordering** — stdout is flushed before fatal errors, so
+  the "Step 1/3" header no longer prints after the error. The full pipeline
+  also removes its half-built project folder when it dies before completing
+  (needs-rescan still keeps its folder and manifest, on purpose).
+
 ## [Unreleased]
 
 ### Added

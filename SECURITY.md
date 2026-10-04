@@ -6,12 +6,13 @@ pipeline treats them that way.
 
 ## What we promise about your data
 
-1. **No network calls. Ever.**
-   The pipeline scripts and the `mesh-to-cad` CLI make zero HTTP requests,
-   download nothing, and phone home for no reason. Once dependencies are
-   installed, everything runs fully offline. Your input files are read from
-   your disk, output files are written to your disk, and nothing leaves the
-   machine in between.
+1. **One network call exists in the entire tool — and only when you ask.**
+   `mesh-to-cad update` makes a single HTTPS request to the GitHub API to
+   check for a newer release. It never runs on its own: not on startup,
+   not in the background, not as part of any pipeline stage. Every other
+   subcommand (`units`, `check`, `analyze`, `deviation`, `changelog`, and
+   the full pipeline) is fully offline. See "Network behavior" below for
+   the complete guarantee.
 
 2. **No telemetry, no analytics, no crash reporting.**
    We don't track usage, count runs, or send error reports anywhere. If a
@@ -39,17 +40,47 @@ pipeline treats them that way.
    temp directory and cleans up after itself. No CloudCompare account,
    no online services involved.
 
+## Network behavior
+
+**Guarantee: the ONLY network call in this tool is the manual
+`mesh-to-cad update` command.** Everything else — the full pipeline and
+every other subcommand — makes zero network requests, period.
+
+Concretely:
+
+| Command | Network? | What it contacts |
+|---|---|---|
+| `mesh-to-cad <file>` (full pipeline) | No | — |
+| `mesh-to-cad units/check/analyze` | No | — |
+| `mesh-to-cad deviation` | No | (runs a local CloudCompare binary) |
+| `mesh-to-cad changelog` | No | (reads the bundled CHANGELOG.md from disk) |
+| `mesh-to-cad update` | **Yes** | `https://api.github.com/repos/GruntAndMuse/mesh-to-cad/releases/latest` (and the releases list, for the revert link) |
+
+Rules this guarantee rests on:
+
+- `update` runs **only** when you type it. There is no startup check, no
+  background thread, no timer, no "phone home on first run." The network
+  code (`_fetch_json` in the CLI) is unreachable from any other code path.
+- `update` sends no data about you or your files — it's a plain GET for
+  public release metadata (version tag, changelog text, download URLs).
+  No authentication, no cookies, no identifiers beyond a User-Agent string.
+- `update --help` states the exact URL it contacts. If you work on
+  classified or air-gapped networks: simply don't run `update`. Nothing
+  else in the tool will touch the network on your behalf.
+
 ## How to verify this yourself
 
 Don't take our word for it — that's the whole point of FOSS.
 
 ```bash
-# 1. Confirm no network code exists (should print nothing):
-grep -rn "urllib\|requests\|urlopen\|socket\.connect" scripts/ mesh-to-cad
+# 1. Confirm the ONLY network code is the update command
+#    (expect hits only inside _fetch_json / cmd_update in the CLI):
+grep -rn "urllib\|requests\|urlopen\|socket" mesh-to-cad scripts/*.py
 
 # 2. Disconnect from the internet entirely, then run the pipeline:
-#    (it works — every test in test-samples/ was run this way)
+#    (everything except `mesh-to-cad update` works — try it)
 .venv/bin/python mesh-to-cad myfile.stl
+.venv/bin/python mesh-to-cad changelog
 
 # 3. Confirm exact dependency versions:
 .venv/bin/pip freeze | sort
