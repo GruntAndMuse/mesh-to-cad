@@ -89,6 +89,39 @@ at build time and attached to the GitHub release alongside the binaries.
 This is what protects against corrupted or tampered binaries, however
 they arrive.
 
+## Release signatures (Sigstore)
+
+Checksums prove the file wasn't corrupted. **Signatures prove who built
+it.** Every release from v1.0.2 onward ships a `.sigstore` bundle per
+asset (including `checksums.txt` itself), created at build time by CI via
+[Sigstore](https://www.sigstore.dev/) using GitHub OIDC — no long-lived
+keys to steal, no secrets to manage. The signature attests that these
+exact bytes were produced by this repo's `build.yml` workflow running on
+a version tag.
+
+**To verify a download** (substitute the tag for the release you're
+checking):
+
+```bash
+pip install sigstore   # once
+
+# Download the asset AND its .sigstore bundle from the release page, then:
+sigstore verify identity \
+  --bundle mesh-to-cad-linux.sigstore \
+  --cert-identity "https://github.com/GruntAndMuse/mesh-to-cad/.github/workflows/build.yml@refs/tags/v1.0.2" \
+  --cert-oidc-issuer "https://token.actions.githubusercontent.com" \
+  mesh-to-cad-linux
+```
+
+A good signature prints `OK`. The `--cert-identity` is the exact OIDC
+identity CI signed as: the workflow file pinned to the tag ref. If the
+binary came from anywhere other than that workflow run, verification
+fails — that's the point.
+
+Verify the signature first (authenticity), then the checksum (integrity):
+a valid signature on `checksums.txt` plus a matching SHA-256 means the
+binary is both genuine and intact.
+
 ## How to verify this yourself
 
 Don't take our word for it — that's the whole point of FOSS.

@@ -90,6 +90,9 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
+      id-token: write  # WHY: Sigstore signing needs the OIDC token.
+                       # No secrets, no stored keys — GitHub mints a
+                       # short-lived identity token per run.
 
     steps:
       - name: Download all artifacts
@@ -121,6 +124,31 @@ jobs:
           (cd ./artifacts/mesh-to-cad-macos && sha256sum mesh-to-cad-macos) >> ./artifacts/checksums.txt
           (cd ./artifacts/mesh-to-cad-windows && sha256sum mesh-to-cad-windows.exe) >> ./artifacts/checksums.txt
           cat ./artifacts/checksums.txt
+
+      - name: Sign release assets with Sigstore
+        # WHY: checksums prove the file wasn't corrupted; signatures prove
+        # WHO built it. Sigstore (via GitHub OIDC) attests that these exact
+        # bytes came from this repo's build.yml running on a version tag —
+        # no long-lived keys to steal, no secrets to manage. Each asset
+        # (including checksums.txt itself) gets a .sigstore bundle.
+        # Pilot for the GruntAndMuse-wide pattern — see SIGSTORE-PATTERN.md.
+        uses: sigstore/gh-action-sigstore-python@v3.4.0
+        with:
+          inputs: >-
+            ./artifacts/checksums.txt
+            ./artifacts/mesh-to-cad-linux/mesh-to-cad-linux
+            ./artifacts/mesh-to-cad-macos/mesh-to-cad-macos
+            ./artifacts/mesh-to-cad-windows/mesh-to-cad-windows.exe
+
+      - name: Confirm signature bundles
+        # WHY: fail loudly if signing silently produced nothing. An unsigned
+        # release must never ship while the docs claim signatures.
+        shell: bash
+        run: |
+          ls ./artifacts/checksums.txt.sigstore \
+             ./artifacts/mesh-to-cad-linux/mesh-to-cad-linux.sigstore \
+             ./artifacts/mesh-to-cad-macos/mesh-to-cad-macos.sigstore \
+             ./artifacts/mesh-to-cad-windows/mesh-to-cad-windows.exe.sigstore
 
       - name: Create release
         uses: softprops/action-gh-release@v2

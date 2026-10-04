@@ -36,6 +36,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   sneakernet (offline) instructions include a manual verify step
   (`sha256sum` / PowerShell `Get-FileHash`). The transport was never the
   security — verification is. Documented in SECURITY.md.
+- **Sigstore release signing (pilot)** — every release asset (including
+  `checksums.txt`) now ships a `.sigstore` bundle, signed at build time by
+  CI via GitHub OIDC. No keys to manage. Verifying the signature proves
+  the bytes came from this repo's `build.yml` on the version tag; verify
+  signature first, checksum second. See SECURITY.md and
+  SIGSTORE-PATTERN.md (the reusable pattern for med-tracker/document-ocr).
 
 ## [1.0.1] — 2026-10-03
 
