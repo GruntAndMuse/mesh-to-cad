@@ -46,6 +46,19 @@ jobs:
           pip install -r scripts/requirements.txt
           pip install pyinstaller
 
+      - name: Stamp build date
+        # WHY: the offline build-age nudge needs to know when THIS binary
+        # was built. Generate _build_info.py now, just before PyInstaller
+        # runs — the CLI imports it (guarded: dev checkouts don't have it,
+        # so no nudge, no crash), and PyInstaller's analysis bundles it
+        # because the entry script imports it. The date is the RELEASE
+        # build date, not the source-write date. UTC, YYYY-MM-DD.
+        # Pure local clock read — zero network.
+        shell: bash
+        run: |
+          python -c "from datetime import date, timezone; print('BUILD_DATE = \"' + date.today(timezone.utc).isoformat() + '\"')" > _build_info.py
+          cat _build_info.py
+
       - name: Build executable
         run: pyinstaller --noconfirm mesh-to-cad.spec
 
@@ -55,11 +68,12 @@ jobs:
           # The exe must at least print --help without crashing.
           # WHY: catches the "built but broken" failure we hit on 2026-10-02
           # (missing version-info.txt, scripts/ not bundled).
-          if [[ "${{ matrix.os }}" == "windows-latest" ]]; then
-            ./dist/${{ matrix.exe_name }} --help
-          else
-            ./dist/${{ matrix.exe_name }} --help
-          fi
+          ./dist/${{ matrix.exe_name }} --help
+          # The build date must be stamped into --version output.
+          # WHY: the offline build-age nudge depends on it; if the stamp
+          # step silently failed, the release would never nudge.
+          ./dist/${{ matrix.exe_name }} --version | grep -q "(built " || \
+            (echo "BUILD DATE NOT STAMPED — _build_info.py missing from bundle" && exit 1)
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
@@ -93,6 +107,20 @@ jobs:
           mv ./artifacts/mesh-to-cad-macos/mesh-to-cad ./artifacts/mesh-to-cad-macos/mesh-to-cad-macos
           mv ./artifacts/mesh-to-cad-windows/mesh-to-cad.exe ./artifacts/mesh-to-cad-windows/mesh-to-cad-windows.exe
           ls ./artifacts/*/*
+
+      - name: Generate checksums.txt
+        # WHY: the transport (HTTPS download vs USB sneakernet) was never
+        # the security — VERIFICATION is. Every release ships a checksums.txt
+        # (SHA-256, one "<hash>  <filename>" line per asset) so `update` can
+        # verify downloads and air-gapped users can verify USB copies.
+        # Filenames are the release asset basenames, matching what
+        # `mesh-to-cad update` looks up.
+        shell: bash
+        run: |
+          (cd ./artifacts/mesh-to-cad-linux && sha256sum mesh-to-cad-linux) > ./artifacts/checksums.txt
+          (cd ./artifacts/mesh-to-cad-macos && sha256sum mesh-to-cad-macos) >> ./artifacts/checksums.txt
+          (cd ./artifacts/mesh-to-cad-windows && sha256sum mesh-to-cad-windows.exe) >> ./artifacts/checksums.txt
+          cat ./artifacts/checksums.txt
 
       - name: Create release
         uses: softprops/action-gh-release@v2
