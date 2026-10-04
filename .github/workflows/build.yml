@@ -56,7 +56,7 @@ jobs:
         # Pure local clock read — zero network.
         shell: bash
         run: |
-          python3 -c "from datetime import date, timezone; print('BUILD_DATE = \"' + date.today(timezone.utc).isoformat() + '\"')" > _build_info.py
+          python3 -c "from datetime import datetime, timezone; print('BUILD_DATE = \"' + datetime.now(timezone.utc).date().isoformat() + '\"')" > _build_info.py
           cat _build_info.py
 
       - name: Build executable
