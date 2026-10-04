@@ -139,31 +139,26 @@ jobs:
             ./artifacts/mesh-to-cad-linux/mesh-to-cad-linux
             ./artifacts/mesh-to-cad-macos/mesh-to-cad-macos
             ./artifacts/mesh-to-cad-windows/mesh-to-cad-windows.exe
-          upload-signing-artifacts: true
 
-      - name: Confirm signature bundles
-        # WHY: fail loudly if signing silently produced nothing. An unsigned
-        # release must never ship while the docs claim signatures.
-        # Discovery-based: the action's bundle naming/location has changed
-        # across versions, so find whatever it produced and stage it next
-        # to its asset for the release upload.
+      - name: Stage signature bundles
+        # WHY: the action emits <asset>.sigstore.json next to each input;
+        # we publish them as <asset>.sigstore (the bundle extension used in
+        # the docs and verify commands). Fail loudly if any bundle is
+        # missing — an unsigned release must never ship while the docs
+        # claim signatures.
         shell: bash
         run: |
-          echo "=== all sigstore outputs ==="
-          find . -name "*.sigstore*" -not -path "./.git/*" | sort
-          echo "=== staging ==="
-          staged=0
-          for b in $(find . -name "*.sigstore*" -not -path "./.git/*" -not -path "./artifacts/*" | sort); do
-            base=$(basename "$b" | sed 's/\.sigstore.*$//')
-            echo "bundle: $b -> asset base: $base"
-            staged=1
+          for f in ./artifacts/checksums.txt \
+                   ./artifacts/mesh-to-cad-linux/mesh-to-cad-linux \
+                   ./artifacts/mesh-to-cad-macos/mesh-to-cad-macos \
+                   ./artifacts/mesh-to-cad-windows/mesh-to-cad-windows.exe; do
+            if [ -f "$f.sigstore.json" ]; then
+              mv "$f.sigstore.json" "$f.sigstore"
+              echo "staged: $f.sigstore"
+            else
+              echo "MISSING signature bundle for $f" && exit 1
+            fi
           done
-          # Bundles produced next to inputs are already staged.
-          for b in $(find ./artifacts -name "*.sigstore*" | sort); do
-            echo "staged: $b"
-            staged=1
-          done
-          [ "$staged" -eq 1 ] || (echo "NO SIGNATURE BUNDLES PRODUCED" && exit 1)
 
       - name: Create release
         uses: softprops/action-gh-release@v2

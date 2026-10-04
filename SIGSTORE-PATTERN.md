@@ -33,14 +33,21 @@ In the release job (the one that only runs on version tags):
             ./artifacts/<asset-1>
             ./artifacts/<asset-2>
 
-      - name: Confirm signature bundles
-        # Fail loudly if signing silently produced nothing — an unsigned
-        # release must never ship while the docs claim signatures.
+      - name: Stage signature bundles
+        # The action emits <asset>.sigstore.json next to each input; we
+        # publish them as <asset>.sigstore. Fail loudly if any is missing.
         shell: bash
         run: |
-          ls ./artifacts/checksums.txt.sigstore \
-             ./artifacts/<asset-1>.sigstore \
-             ./artifacts/<asset-2>.sigstore
+          for f in ./artifacts/checksums.txt \
+                   ./artifacts/<asset-1> \
+                   ./artifacts/<asset-2>; do
+            if [ -f "$f.sigstore.json" ]; then
+              mv "$f.sigstore.json" "$f.sigstore"
+              echo "staged: $f.sigstore"
+            else
+              echo "MISSING signature bundle for $f" && exit 1
+            fi
+          done
 
       # ... create release with files: ./artifacts/**/* ...
 ```
@@ -103,4 +110,7 @@ sigstore verify identity \
 - Sign `checksums.txt` too — it authenticates the integrity list itself.
 - The confirm-bundles step is load-bearing: it turns "signing silently did
   nothing" from a silent doc lie into a loud CI failure.
+- The action emits `<asset>.sigstore.json` next to each input (v3.4.0
+  behavior — verify, don't assume, if you upgrade). We rename to
+  `<asset>.sigstore` for the published extension.
 - Pin the action version (`@v3.4.0`, not `@v3`) for reproducible builds.
