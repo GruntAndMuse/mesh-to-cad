@@ -143,12 +143,26 @@ jobs:
       - name: Confirm signature bundles
         # WHY: fail loudly if signing silently produced nothing. An unsigned
         # release must never ship while the docs claim signatures.
+        # The action writes <basename>.sigstore into the working directory
+        # (not next to the inputs), so move each bundle next to its asset —
+        # the release upload glob (./artifacts/**/*) picks them up there.
         shell: bash
         run: |
-          ls ./artifacts/checksums.txt.sigstore \
-             ./artifacts/mesh-to-cad-linux/mesh-to-cad-linux.sigstore \
-             ./artifacts/mesh-to-cad-macos/mesh-to-cad-macos.sigstore \
-             ./artifacts/mesh-to-cad-windows/mesh-to-cad-windows.exe.sigstore
+          for f in ./artifacts/checksums.txt \
+                   ./artifacts/mesh-to-cad-linux/mesh-to-cad-linux \
+                   ./artifacts/mesh-to-cad-macos/mesh-to-cad-macos \
+                   ./artifacts/mesh-to-cad-windows/mesh-to-cad-windows.exe; do
+            base=$(basename "$f")
+            if [ -f "$f.sigstore" ]; then
+              echo "found: $f.sigstore"
+            elif [ -f "./$base.sigstore" ]; then
+              mv "./$base.sigstore" "$f.sigstore"
+              echo "moved: ./$base.sigstore -> $f.sigstore"
+            else
+              echo "MISSING signature bundle for $f" && exit 1
+            fi
+          done
+          ls ./artifacts/*.sigstore ./artifacts/*/*.sigstore
 
       - name: Create release
         uses: softprops/action-gh-release@v2
