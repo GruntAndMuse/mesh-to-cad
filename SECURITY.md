@@ -163,6 +163,16 @@ one. Open an issue at
 https://github.com/GruntAndMuse/mesh-to-cad/issues with what you found.
 We treat privacy violations like data-loss bugs: fix first, explain after.
 
+## Reporting a security vulnerability
+
+If you find a security bug, don't open a public issue — use GitHub's
+**private vulnerability reporting** (Security tab → "Report a vulnerability"),
+or email security@gruntandmuse.com.
+Include what you found, how to reproduce it, and what you think the impact is.
+We'll acknowledge within 7 days and keep you posted until it's fixed.
+No bug bounty (we're a two-man pro-bono shop), but you'll get credit in the
+changelog unless you'd rather stay anonymous.
+
 ---
 *This file is a living commitment, not a marketing page. If the pipeline's
 behavior ever needs to change in a way that weakens these guarantees, that
